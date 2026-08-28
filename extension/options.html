@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>私信智能顾问 · 企业工作台 Studio</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <div>
+        <div class="brand-title">私信智能顾问</div>
+        <div style="font-size:11px;color:var(--text-muted);">Enterprise Studio</div>
+      </div>
+      <span class="brand-badge">V1.0</span>
+    </div>
+
+    <nav class="nav-menu">
+      <div class="nav-item active" data-tab="models">
+        <span>🤖</span> 模型与引擎中心
+      </div>
+      <div class="nav-item" data-tab="business">
+        <span>🏢</span> 业务画像与语气调性
+      </div>
+      <div class="nav-item" data-tab="knowledge">
+        <span>📚</span> 专业知识库 Studio
+      </div>
+      <div class="nav-item" data-tab="faq">
+        <span>💬</span> 结构化标准问答 (FAQ)
+      </div>
+      <div class="nav-item" data-tab="crm">
+        <span>👥</span> 捕获客资与线索中心
+      </div>
+      <div class="nav-item" data-tab="runtime">
+        <span>⚡</span> 运行监控与安全
+      </div>
+    </nav>
+
+    <div class="sidebar-footer">
+      <button class="btn btn-primary" id="btnSaveAll" style="width:100%;">
+        💾 保存全局配置
+      </button>
+      <a href="https://pro.xiaohongshu.com/im/multiCustomerService" target="_blank" class="btn btn-secondary" style="width:100%;text-decoration:none;">
+        🚀 打开小红书客服台
+      </a>
+    </div>
+  </aside>
+
+  <!-- Main Wrapper -->
+  <div class="main-wrapper">
+    <header class="top-header">
+      <div class="header-title" id="pageHeaderTitle">🤖 大模型服务商与 API 引擎配置</div>
+      <div class="header-actions">
+        <div class="status-pill online" id="topStatusPill">
+          <span class="pulse-dot"></span> <span id="topStatusText">本地就绪</span>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="btnReloadExtension">🔄 重新加载插件</button>
+      </div>
+    </header>
+
+    <main class="content-area">
+      <!-- Tab 1: Models -->
+      <section class="tab-pane active" id="tab-models">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">大模型服务商配置 (BYOK 自带 Key)</div>
+              <div class="card-desc">选择你常用的大模型服务商。Key 保存在浏览器本地；生成回复时会经你的 Bridge 临时转发给模型厂商，云端数据库不保存明文 Key。</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btnTestModel">⚡ 一键测试连通性</button>
+          </div>
+
+          <div class="form-grid">
+            <div class="form-group">
+              <label class="form-label">大模型服务商</label>
+              <select class="form-select" id="modelProvider">
+                <option value="deepseek">DeepSeek 深度求索 (推荐 · 性价比最高)</option>
+                <option value="openai">OpenAI (GPT-4o / GPT-4o-mini / o3-mini)</option>
+                <option value="dashscope">阿里通义千问 (DashScope · Qwen-Plus/Max)</option>
+                <option value="zhipu">智谱清言 (GLM-4-Plus / GLM-4-Flash)</option>
+                <option value="moonshot">月之暗面 Kimi (Moonshot-v1)</option>
+                <option value="siliconflow">硅基流动 (SiliconFlow 高速端点)</option>
+                <option value="volcengine">字节跳动豆包 (火山引擎)</option>
+                <option value="minimax">MiniMax (海螺 AI)</option>
+                <option value="openrouter">OpenRouter (全球模型聚合)</option>
+                <option value="custom">自定义兼容 OpenAI 格式 API (私有化/代理)</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">API Key 凭据</label>
+              <input type="password" class="form-input" id="modelApiKey" placeholder="sk-..." autocomplete="off">
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">模型名称 (Model Name)</label>
+              <input type="text" class="form-input" id="modelName" value="deepseek-chat">
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">API Base URL</label>
+              <input type="text" class="form-input" id="modelBaseUrl" value="https://api.deepseek.com/chat/completions">
+            </div>
+          </div>
+
+          <div id="modelTestResult" style="margin-top:16px;font-size:13px;display:none;"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">独立向量嵌入模型 (可选 · 混合检索增强)</div>
+              <div class="card-desc">如不配置，系统会自动降级为专业 BM25 关键词切片检索，不影响正常使用。</div>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label class="form-label">向量模型 API 地址</label>
+              <input type="text" class="form-input" id="embeddingBaseUrl" placeholder="https://api.openai.com/v1/embeddings">
+            </div>
+            <div class="form-group">
+              <label class="form-label">向量模型名称</label>
+              <input type="text" class="form-input" id="embeddingModel" placeholder="text-embedding-3-small">
+            </div>
+            <div class="form-group">
+              <label class="form-label">独立向量 API Key (可选，留空则复用主 Key)</label>
+              <input type="password" class="form-input" id="embeddingApiKey" placeholder="留空则复用上方主 API Key" autocomplete="off">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 2: Business -->
+      <section class="tab-pane" id="tab-business">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">店铺画像与业务信息</div>
+              <div class="card-desc">AI 回复的基础事实依据，确保回复契合你的真实业务，不瞎编乱造。</div>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label class="form-label">工作区名称</label>
+              <input type="text" class="form-input" id="workspaceName" placeholder="例如：新作家装设计馆">
+            </div>
+            <div class="form-group">
+              <label class="form-label">店铺小红书号</label>
+              <input type="text" class="form-input" id="accountId" placeholder="例如：bagtec_001 (用于多店铺隔离)">
+            </div>
+            <div class="form-group">
+              <label class="form-label">业务线分类</label>
+              <input type="text" class="form-input" id="businessLine" value="default" placeholder="例如：home_design">
+            </div>
+            <div class="form-group">
+              <label class="form-label">品牌 / IP 名称</label>
+              <input type="text" class="form-input" id="brandName" placeholder="例如：新作AI家装">
+            </div>
+            <div class="form-group" style="grid-column: span 2;">
+              <label class="form-label">对话语气风格 (Tone Profile)</label>
+              <select class="form-select" id="toneProfile">
+                <option value="warm_consultant">🏡 热情亲切顾问风 (自然口语短句、同理心倾听、接地气引导 · 推荐)</option>
+                <option value="b2b_expert">💼 专业精英专家风 (条理清晰、数据说话、严谨精炼 · 适合B端/SaaS)</option>
+                <option value="creator_ip">🎨 独立主理人调性 (真诚平和、不卑不亢、有个人品味 · 适合摄影/设计/IP)</option>
+              </select>
+            </div>
+            <div class="form-group" style="grid-column: span 2;">
+              <label class="form-label">核心业务与产品介绍</label>
+              <textarea class="form-textarea" id="businessProfile" rows="3" placeholder="介绍你卖什么、服务谁、核心产品优势、价格区间与交付周期..."></textarea>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">转化策略与风控偏好</div>
+              <div class="card-desc">定义 AI 的沟通节奏、语气风格与留资动作。</div>
+            </div>
+          </div>
+          <div class="form-grid full">
+            <div class="form-group">
+              <label class="form-label">自定义回复规则与销售偏好</label>
+              <textarea class="form-textarea" id="replyPreferences" rows="4" placeholder="例如：1. 客户咨询方案时，先回答关键疑问，再赠送避坑指南，顺势引导留微信/手机号；2. 严禁与客户发生争吵，遇到客诉主动提示转人工客服。"></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 3: Knowledge Studio -->
+      <section class="tab-pane" id="tab-knowledge">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">业务知识资料库 (非强制 · 支持即拖即用)</div>
+              <div class="card-desc">支持拖入 PDF、Word、PPT、Excel 报价表、Markdown、TXT。知识库完全可选，不配置也能流畅回复。</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btnRefreshDocs">🔄 刷新列表</button>
+          </div>
+
+          <label class="dropzone" id="knowledgeDropzone">
+            <div class="drop-icon">📁</div>
+            <div class="drop-text">点击或拖拽文件到这里上传</div>
+            <div class="drop-sub">支持 .pdf, .docx, .pptx, .xlsx, .csv, .txt, .md（单文件 ≤ 12MB）</div>
+            <input type="file" id="fileUploadInput" accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md" multiple hidden>
+          </label>
+          <div id="uploadStatusText" style="margin-top:10px;font-size:12px;color:var(--text-muted);"></div>
+
+          <div style="margin-top:20px;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>资料标题</th>
+                  <th>类型</th>
+                  <th>切片数</th>
+                  <th>索引状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="documentTableBody">
+                <tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:24px;">暂无已上传的业务资料</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">飞书私有文档与知识库对接</div>
+              <div class="card-desc">一键同步飞书在线云文档与知识库，保持最新产品动态。</div>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div class="form-group" style="grid-column:span 2;display:flex;gap:10px;">
+              <input type="text" class="form-input" id="feishuDocUrl" placeholder="粘贴飞书 Docx / Wiki 链接" style="flex:1;">
+              <button class="btn btn-secondary" id="btnImportFeishu">一键导入飞书</button>
+            </div>
+            <div class="form-group">
+              <label class="form-label">飞书自建应用 App ID (私有文档必填)</label>
+              <input type="text" class="form-input" id="feishuAppId" placeholder="cli_...">
+            </div>
+            <div class="form-group">
+              <label class="form-label">App Secret</label>
+              <input type="password" class="form-input" id="feishuAppSecret" placeholder="秘钥仅存本地" autocomplete="off">
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">知识库检索测试实验室 (Sandbox)</div>
+              <div class="card-desc">模拟客户提问，即时测试知识库召回效果与匹配得分。</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;margin-bottom:14px;">
+            <input type="text" class="form-input" id="testQueryInput" placeholder="输入模拟客户提问（如：老房翻新设计费怎么算？）" style="flex:1;">
+            <button class="btn btn-primary" id="btnRunTestQuery">⚡ 测试检索</button>
+          </div>
+          <div id="testQueryResult" style="background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:14px;font-size:13px;display:none;"></div>
+        </div>
+      </section>
+
+      <!-- Tab 4: FAQ (New Feature) -->
+      <section class="tab-pane" id="tab-faq">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">添加标准问答 (FAQ)</div>
+              <div class="card-desc">针对高频问答设置标准回复口径。当客户提问命中时，AI 会优先采用这里的要点。</div>
+            </div>
+          </div>
+          <div class="form-grid full">
+            <div class="form-group">
+              <label class="form-label">客户常见问题 (Question)</label>
+              <input type="text" class="form-input" id="faqQuestion" placeholder="例如：你们设计费怎么收费？">
+            </div>
+            <div class="form-group">
+              <label class="form-label">触发关键词 / 别名 (多个用逗号隔开)</label>
+              <input type="text" class="form-input" id="faqKeywords" placeholder="例如：设计费, 报价, 多少钱一平, 价格">
+            </div>
+            <div class="form-group">
+              <label class="form-label">标准回答要点 (Answer)</label>
+              <textarea class="form-textarea" id="faqAnswer" rows="3" placeholder="例如：现代简约全案设计费按200元/平米收取，包含全套施工图与3D效果图。发我户型图可先免费出一套动线规划方案~"></textarea>
+            </div>
+            <div>
+              <button class="btn btn-primary" id="btnAddFaq">➕ 添加到标准问答库</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">已配置的标准问答库</div>
+              <div class="card-desc">商家专有问答对列表，支持启用/停用与删除。</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btnRefreshFaq">🔄 刷新问答</button>
+          </div>
+          <div id="faqListContainer">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:25%;">常见问题</th>
+                  <th style="width:45%;">标准答案</th>
+                  <th style="width:15%;">关键词</th>
+                  <th style="width:15%;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="faqTableBody">
+                <tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:24px;">暂无问答对</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 5: CRM Leads (New Feature) -->
+      <section class="tab-pane" id="tab-crm">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">捕获客资与线索汇总</div>
+              <div class="card-desc">AI 在私信沟通过程中自动识别并提取的意向客户手机号与微信号。</div>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-primary btn-sm" id="btnExportLeads">📥 导出 Excel / CSV</button>
+              <button class="btn btn-secondary btn-sm" id="btnRefreshLeads">🔄 刷新线索</button>
+            </div>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>客户昵称</th>
+                <th>线索类型</th>
+                <th>联系方式</th>
+                <th>意向场景</th>
+                <th>捕获时间</th>
+              </tr>
+            </thead>
+            <tbody id="leadsTableBody">
+              <tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:24px;">暂无捕获客资</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Tab 6: Runtime -->
+      <section class="tab-pane" id="tab-runtime">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">运行状态与值守规则</div>
+              <div class="card-desc">控制 AI 的运行开关、工作模式与防骚扰限制。</div>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label class="form-label">插件总开关</label>
+              <select class="form-select" id="masterToggle">
+                <option value="true">开启运行 (启用小红书智能辅助)</option>
+                <option value="false">关闭暂停 (不读取、不生成、不发送)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">工作模式</label>
+              <select class="form-select" id="runMode">
+                <option value="copilot">半自动副驾 (推荐 · 仅预填草稿，人工确认发送)</option>
+                <option value="full_auto">全自动值守 (夜间/无人操作时自动回复)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">生效时段</label>
+              <select class="form-select" id="timeScope">
+                <option value="all_day">全天 24 小时运行</option>
+                <option value="night_only">仅夜间值守 (22:00 - 09:00)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">单小时最大回复上限</label>
+              <input type="number" class="form-input" id="maxRepliesPerHour" value="12">
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">实战反馈案例库统计</div>
+              <div class="card-desc">你在小红书前台点击「记住当前人工话术」沉淀的经验。</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btnRefreshFeedback">🔄 刷新案例</button>
+          </div>
+          <div id="feedbackListContainer" style="font-size:13px;color:var(--text-muted);">
+            正在加载已沉淀案例...
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

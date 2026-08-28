@@ -1,0 +1,70 @@
+{
+  "manifest_version": 3,
+  "name": "小红书私信智能自动回复助手 (XHS Auto-Reply Pro)",
+  "version": "1.0.0",
+  "description": "适配专业号客服工作台的上下文私信副驾、多模型支持、专业知识库Studio、夜间值守与线索捕获助手",
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "小红书私信智能顾问",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "*://creator.xiaohongshu.com/*",
+    "*://pro.xiaohongshu.com/*",
+    "*://business.xiaohongshu.com/*",
+    "*://customer.xiaohongshu.com/*",
+    "*://qianfan.xiaohongshu.com/*",
+    "*://www.xiaohongshu.com/*",
+    "*://edith.xiaohongshu.com/*",
+    "http://127.0.0.1/*",
+    "http://127.0.0.1/*",
+    "https://localhost/*",
+    "https://api.openai.com/*",
+    "https://api.deepseek.com/*",
+    "https://dashscope.aliyuncs.com/*",
+    "https://open.bigmodel.cn/*",
+    "https://api.moonshot.cn/*",
+    "https://api.siliconflow.cn/*",
+    "https://ark.cn-beijing.volces.com/*",
+    "https://api.minimax.chat/*",
+    "https://openrouter.ai/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://creator.xiaohongshu.com/*",
+        "*://pro.xiaohongshu.com/*",
+        "*://business.xiaohongshu.com/*",
+        "*://customer.xiaohongshu.com/*",
+        "*://qianfan.xiaohongshu.com/*",
+        "*://www.xiaohongshu.com/*",
+        "*://edith.xiaohongshu.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "floating-dock.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+# 小红书私信智能顾问 Bridge
+
+这是 V1.0 的自托管 LLM Bridge。它负责工作区隔离、业务知识检索、人工反馈学习、回复安全校验和模型请求转发。
+
+## 本地启动
+
+```bash
+cp .env.example .env
+python3 agent.py
+```
+
+默认监听地址以 `agent.py` 中的启动配置为准。生产部署时请启用 `XHS_PRODUCT_MODE=1`，配置允许访问的模型主机，并通过反向代理提供 HTTPS。
+
+## 测试
+
+```bash
+python3 -m unittest discover -v
+```
+
+不要提交 `.env`、SQLite 数据库、访问日志或真实工作区令牌。
