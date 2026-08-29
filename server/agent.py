@@ -42,6 +42,26 @@ def list_tenant_leads(tenant_id: str) -> list[dict]:
         ).fetchall()
         return [dict(zip(["id", "session_id", "user_name", "lead_type", "lead_value", "context_summary", "created_at"], row)) for row in rows]
 
+def delete_tenant_lead(tenant_id: str, lead_id: str) -> bool:
+    if not tenant_id or not lead_id:
+        return False
+    with sqlite3.connect(FEEDBACK_DB) as conn:
+        cur = conn.execute("DELETE FROM tenant_leads WHERE tenant_id=? AND id=?", (tenant_id, lead_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+def clear_tenant_leads(tenant_id: str) -> int:
+    if not tenant_id:
+        return 0
+    with sqlite3.connect(FEEDBACK_DB) as conn:
+        cur = conn.execute("DELETE FROM tenant_leads WHERE tenant_id=?", (tenant_id,))
+        conn.commit()
+        return cur.rowcount
+
+def _csv_safe(value) -> str:
+    text = str(value or "")
+    return "'" + text if text.startswith(("=", "+", "-", "@")) else text
+
 def add_tenant_faq(tenant_id: str, question: str, answer: str, keywords: str) -> dict:
     faq_id = f"faq_{secrets.token_hex(10)}"
     now = datetime.now(timezone.utc).isoformat()
@@ -126,6 +146,10 @@ FEEDBACK_DB = Path(os.environ.get(
     "XHS_FEEDBACK_DB",
     Path(__file__).resolve().parent / "data" / "xhs_reply_feedback.sqlite3",
 ))
+
+# 注册接口应用层限流：自托管直连(无 nginx)时兜底防工作区表被灌爆。
+REGISTER_MAX_PER_MINUTE = 10
+REGISTER_HITS: dict[str, list[float]] = {}
 
 SYSTEM_PROMPT = """你是小红书私信顾问。你的目标不是套模板索要联系方式，而是先看懂这位客户刚刚说了什么，再自然推进下一步。
 
@@ -967,6 +991,7 @@ def _is_external_action_status_check(value: str) -> bool:
         return False
     return bool(re.search(
         r"(?:加|添加|通过|申请|发送|发)(?:了|上|好|过)?(?:没|没有|了吗|了没|没啊|没有啊)"
+        r"|(?:加|通过).{0,4}(?:了吗|没呀|没啊)"
         r"|(?:好友申请|资料|链接|邀请码).{0,6}(?:收到没|收到了吗|发了吗|发了没)",
         text,
     ))
@@ -1033,11 +1058,15 @@ def reply_quality_issues(latest_msg: str, turns: list, reply: str) -> list[str]:
     if _is_external_action_status_check(latest):
         if re.search(r"实际效果|操作流程|了解(?:一下)?|产品介绍|怎么用", current):
             issues.append("客户在确认外部动作状态，回复却把话题岔到产品介绍")
-        if re.search(r"(?:已经|已)(?:发送|添加|通过|处理)|加好了|发好了", current) and not re.search(r"无法确认|不能确认|暂时看不到|需要核对", current):
+        if re.search(
+            r"(?:已经?|刚刚?|正在|这就)(?:[^。！？\n]{0,10})?(?:发送|发出|添加|加好|通过|处理|提交|申请|搜索)"
+            r"|加好了|发好了|提交了好友申请|通过了好友申请",
+            current,
+        ) and not re.search(r"无法确认|不能确认|暂时看不到|需要核对|还没法|尚未", current):
             issues.append("当前会话无法核验外部动作状态，回复却声称已经完成")
     if re.search(
-        r"(?:我|这边)?(?:这就|马上|稍后|待会儿?|现在).{0,10}(?:添加|加|发送|发|通过|处理)|"
-        r"(?:我|这边)?帮您?.{0,6}(?:添加|加|发送|发|通过)(?:一下)?(?:申请|好友|资料|链接)?",
+        r"(?:我|这边)?(?:这就|马上|稍后|待会儿?|现在|回头).{0,10}(?:添加|加|发送|发|通过|处理|提交|申请|标记|记录)|"
+        r"(?:我|这边)?帮您?.{0,6}(?:添加|加|发送|发|通过|标记|提交)(?:一下)?(?:申请|好友|资料|链接)?",
         current,
     ) and not re.search(r"无法|不能|暂时.{0,4}(?:操作|确认)|需要人工|转人工|您可以", current):
         issues.append("回复承诺执行当前会话无法核验的外部动作")
@@ -1174,7 +1203,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             leads = list_tenant_leads(tenant["id"])
             csv_lines = ["客户昵称,线索类型,联系方式,意向场景,捕获时间"]
             for l in leads:
-                csv_lines.append(f'"{l.get("user_name","")}",{l.get("lead_type","")},{l.get("lead_value","")},"{l.get("context_summary","")}",{l.get("created_at","")}')
+                csv_lines.append(f'"{_csv_safe(l.get("user_name",""))}",{_csv_safe(l.get("lead_type",""))},{_csv_safe(l.get("lead_value",""))},"{_csv_safe(l.get("context_summary",""))}",{l.get("created_at","")}')
             csv_body = "\n".join(csv_lines).encode("utf-8-sig")
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
@@ -1198,7 +1227,21 @@ class HttpHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path == "/tenant/register":
-            payload = self._read_payload()
+            ip = (self.headers.get("X-Forwarded-For") or self.client_address[0] or "-").split(",")[0].strip()
+            now = time.monotonic()
+            recent = [t for t in REGISTER_HITS.get(ip, []) if now - t < 60.0]
+            if len(recent) >= REGISTER_MAX_PER_MINUTE:
+                self._send_json(429, {"ok": False, "error": "too_many_registrations"})
+                return
+            recent.append(now)
+            REGISTER_HITS[ip] = recent
+            if len(REGISTER_HITS) > 10000:
+                REGISTER_HITS.clear()
+            try:
+                payload = self._read_payload()
+            except ValueError:
+                self._send_json(413, {"ok": False, "error": "request_too_large"})
+                return
             try:
                 result = register_tenant(payload.get("workspace_name") or "")
             except ValueError as error:
@@ -1207,12 +1250,32 @@ class HttpHandler(BaseHTTPRequestHandler):
             self._send_json(201, {"ok": True, **result})
             return
 
-        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete"}:
+        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/leads/delete", "/leads/clear"}:
             tenant = self._tenant()
             if PRODUCT_MODE and not tenant:
                 return
-            payload = self._read_payload()
+            try:
+                payload = self._read_payload()
+            except ValueError:
+                self._send_json(413, {"ok": False, "error": "request_too_large"})
+                return
             scope = tenant_scope(tenant, payload.get("knowledge_scope") or "default")
+
+            if path == "/leads/delete":
+                if not tenant:
+                    self._send_json(401, {"ok": False, "error": "tenant_required"})
+                    return
+                deleted = delete_tenant_lead(tenant["id"], str(payload.get("id") or ""))
+                self._send_json(200 if deleted else 404, {"ok": deleted})
+                return
+
+            if path == "/leads/clear":
+                if not tenant:
+                    self._send_json(401, {"ok": False, "error": "tenant_required"})
+                    return
+                removed = clear_tenant_leads(tenant["id"])
+                self._send_json(200, {"ok": True, "deleted": removed})
+                return
 
             if path == "/knowledge/faq/add":
                 if not tenant:

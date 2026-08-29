@@ -26,9 +26,29 @@ class ProductSafetyTest(unittest.TestCase):
         self.assertIn("当前会话无法核验外部动作状态，回复却声称已经完成", issues)
 
     def test_rejects_proactive_external_action_promises(self):
-        for reply in ["我这就添加您", "我马上加您", "稍后把资料发过去", "我帮您通过申请"]:
+        for reply in ["我这就添加您", "我马上加您", "稍后把资料发过去", "我帮您通过申请", "这就给您做标记，之后不再打扰"]:
             issues = agent.reply_quality_issues("麻烦添加下这个", [], reply)
             self.assertIn("回复承诺执行当前会话无法核验的外部动作", issues, reply)
+
+    def test_gate_detects_pronoun_gap_status_check(self):
+        for message in ["你加我微信了吗？怎么还没通过", "你加了吗", "通过了没呀"]:
+            self.assertTrue(agent._is_external_action_status_check(message), message)
+
+    def test_status_question_rejects_past_tense_fabrication(self):
+        issues = agent.reply_quality_issues(
+            "你加我微信了吗？怎么还没通过",
+            [{"role": "customer", "content": "方便加微信聊吗"}, {"role": "assistant", "content": "您微信号发我"}, {"role": "user", "content": "wx: abc123"}],
+            "刚才已经搜索 abc123 提交好友申请了，您看下微信新的朋友里有没有收到？",
+        )
+        self.assertIn("当前会话无法核验外部动作状态，回复却声称已经完成", issues)
+
+    def test_past_tense_honest_disclaimer_passes(self):
+        issues = agent.reply_quality_issues(
+            "你加我微信了吗",
+            [],
+            "这边还没法确认微信那边的状态，需要您看下是否收到申请，没收到的话我让同事人工核对。",
+        )
+        self.assertNotIn("当前会话无法核验外部动作状态，回复却声称已经完成", issues)
 
     def test_product_mode_requires_explicit_byok_headers(self):
         with patch.object(agent, "PRODUCT_MODE", True):
