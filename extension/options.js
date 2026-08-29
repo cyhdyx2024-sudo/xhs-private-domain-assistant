@@ -17,13 +17,43 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const storageGet = keys => new Promise(resolve => chrome.storage.local.get(keys, resolve));
   const storageSet = values => new Promise(resolve => chrome.storage.local.set(values, resolve));
+  const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+
+  async function readJson(response) {
+    const text = await response.text();
+    try { return text ? JSON.parse(text) : {}; }
+    catch (_) { return { ok: false, error: text.slice(0, 160) || `HTTP ${response.status}` }; }
+  }
+
+  async function registerWorkspace(workspaceName) {
+    const response = await fetch(`${SERVICE_URL}/tenant/register`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace_name: workspaceName })
+    });
+    const data = await readJson(response);
+    if (!response.ok || !data.ok || !data.access_token) throw new Error(data.error || '工作区注册失败');
+    return data.access_token;
+  }
+
+  async function saveTenantConfig(token, payload) {
+    const response = await fetch(`${SERVICE_URL}/tenant/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(payload)
+    });
+    const data = await readJson(response);
+    return { response, data };
+  }
 
   const keys = [
     'onboardingComplete', 'enabled', 'runMode', 'timeScope', 'fullAutoArmedAt',
     'maxRepliesPerHour', 'repliedCount', 'leadsCount', 'bridgeUrl', 'workspaceToken',
     'workspaceName', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl',
     'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'accountId',
-    'knowledgeScope', 'brandName', 'businessProfile', 'replyPreferences', 'toneProfile'
+    'knowledgeScope', 'brandName', 'businessProfile', 'replyPreferences', 'toneProfile',
+    'autoReplyMaxAgeMinutes', 'contactBlacklist', 'configVersion'
   ];
 
   let config = await storageGet(keys);
@@ -83,10 +113,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('feishuAppId').value = config.feishuAppId || '';
     $('feishuAppSecret').value = config.feishuAppSecret || '';
 
-    $('masterToggle').value = String(config.enabled !== false);
-    $('runMode').value = config.runMode || 'copilot';
+    $('masterToggle').value = String(Boolean(config.onboardingComplete && config.enabled === true));
+    $('runMode').value = config.onboardingComplete ? (config.runMode || 'copilot') : 'copilot';
     $('timeScope').value = config.timeScope || 'all_day';
     $('maxRepliesPerHour').value = config.maxRepliesPerHour || 12;
+    $('autoReplyMaxAgeMinutes').value = config.autoReplyMaxAgeMinutes || 120;
+    $('contactBlacklist').value = Array.isArray(config.contactBlacklist) ? config.contactBlacklist.join('\n') : '';
   }
 
   // Model Provider Switch
@@ -116,19 +148,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       let token = config.workspaceToken || '';
       const wsName = $('workspaceName').value.trim() || 'My_Workspace';
 
-      // 1. Ensure Tenant Registered
-      if (!token) {
-        const res = await fetch(`${SERVICE_URL}/tenant/register`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspace_name: wsName })
-        });
-        const data = await res.json();
-        if (!res.ok || !data.ok) throw new Error(data.error || '工作区注册失败');
-        token = data.access_token;
-      }
-
-      // 2. Save Business Config to Cloud
+      // 1. Save Business Config to Cloud. A stale token is replaced once, then retried.
       const businessPayload = {
         workspace_name: wsName,
         account_id: $('accountId').value.trim(),
@@ -138,22 +158,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         reply_preferences: $('replyPreferences').value.trim()
       };
 
-      await fetch(`${SERVICE_URL}/tenant/config`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(businessPayload)
-      });
+      if (!token) token = await registerWorkspace(wsName);
+      let saved = await saveTenantConfig(token, businessPayload);
+      if (saved.response.status === 401 || saved.response.status === 403 || saved.data.error === 'workspace_token_invalid') {
+        token = await registerWorkspace(wsName);
+        saved = await saveTenantConfig(token, businessPayload);
+      }
+      if (!saved.response.ok || !saved.data.ok) throw new Error(saved.data.error || `业务配置保存失败（HTTP ${saved.response.status}）`);
 
       // 3. Save Local Config
       const newConfig = {
+        configVersion: '1.0.1',
         onboardingComplete: true,
         enabled: $('masterToggle').value === 'true',
         runMode: $('runMode').value,
         timeScope: $('timeScope').value,
+        fullAutoArmedAt: 0,
+        operatorAway: false,
         maxRepliesPerHour: Number($('maxRepliesPerHour').value) || 12,
+        autoReplyMaxAgeMinutes: Math.min(120, Math.max(10, Number($('autoReplyMaxAgeMinutes').value) || 120)),
+        contactBlacklist: $('contactBlacklist').value.split(/[,，\n]/).map(item => item.trim()).filter(Boolean),
         bridgeUrl: SERVICE_URL,
         workspaceToken: token,
         workspaceName: wsName,
@@ -193,7 +217,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   $('btnSaveAll').addEventListener('click', saveAll);
 
-  // Test Model Connection
+  // Test the real product chain: workspace token -> Bridge -> model provider.
   $('btnTestModel').addEventListener('click', async () => {
     const resBox = $('modelTestResult');
     resBox.style.display = 'block';
@@ -210,18 +234,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    if (!config.workspaceToken) {
+      resBox.style.color = '#ef4444';
+      resBox.textContent = '❌ 请先保存一次全局配置，创建工作区后再测试完整链路';
+      return;
+    }
+
     const start = Date.now();
     try {
-      const response = await fetch(url, {
+      const response = await fetch(`${SERVICE_URL}/reply`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${key}`
+          'Authorization': `Bearer ${config.workspaceToken}`,
+          'X-Model-Key': key,
+          'X-Model-Base-Url': url,
+          'X-Model-Name': model
         },
         body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content: 'hello' }],
-          max_tokens: 5
+          session_id: 'settings_e2e_test', user_name: '链路测试', action: 'reply',
+          latest_msg: '请只回复：链路正常', turns: [{ role: 'user', content: '请只回复：链路正常' }]
         })
       });
 
@@ -232,7 +264,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       resBox.style.color = '#10b981';
-      resBox.textContent = `✅ 连通性测试通过！响应耗时: ${latency}ms · 模型 [${model}] 已就绪`;
+      resBox.textContent = `✅ 完整链路通过！工作区、Bridge 与模型均正常 · ${latency}ms · [${model}]`;
     } catch (e) {
       resBox.style.color = '#ef4444';
       resBox.textContent = `❌ 连接失败: ${e.message}`;
@@ -260,12 +292,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       data.items.forEach(doc => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td style="font-weight:600;">${doc.title}</td>
-          <td><span class="status-pill">${(doc.source_type || 'file').toUpperCase()}</span></td>
-          <td>${doc.chunk_count} 段</td>
+          <td style="font-weight:600;">${escapeHtml(doc.title)}</td>
+          <td><span class="status-pill">${escapeHtml((doc.source_type || 'file').toUpperCase())}</span></td>
+          <td>${Number(doc.chunk_count || 0)} 段</td>
           <td><span class="status-pill ${doc.status === 'ready' ? 'online' : 'warning'}">${doc.status === 'ready' ? '向量+关键词' : '关键词索引'}</span></td>
           <td>
-            <button class="btn btn-secondary btn-sm btn-toggle-doc" data-id="${doc.id}" data-enabled="${doc.enabled}">
+            <button class="btn btn-secondary btn-sm btn-toggle-doc" data-id="${escapeHtml(doc.id)}" data-enabled="${doc.enabled ? 'true' : 'false'}">
               ${doc.enabled ? '停用' : '恢复'}
             </button>
           </td>
@@ -291,7 +323,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
       });
     } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#ef4444;padding:16px;">读取失败: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#ef4444;padding:16px;">读取失败: ${escapeHtml(e.message)}</td></tr>`;
     }
   }
 
@@ -316,8 +348,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function handleFiles(files) {
     const status = $('uploadStatusText');
     for (const file of Array.from(files)) {
-      if (file.size > 12 * 1024 * 1024) {
-        alert(`${file.name} 超过 12MB 上限`);
+      if (file.size > 10 * 1024 * 1024) {
+        alert(`${file.name} 超过 10MB 上限`);
         continue;
       }
       status.textContent = `正在上传并解析 ${file.name}...`;
@@ -417,16 +449,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       const sources = data.knowledge_sources || [];
       resultBox.innerHTML = `
         <div style="font-weight:700;margin-bottom:8px;color:#0f172a;">🤖 AI 预估回复：</div>
-        <div style="background:#ffffff;padding:10px;border-radius:6px;border:1px solid #e2e8f0;margin-bottom:12px;">${data.reply || '无回复'}</div>
+        <div style="background:#ffffff;padding:10px;border-radius:6px;border:1px solid #e2e8f0;margin-bottom:12px;">${escapeHtml(data.reply || '无回复')}</div>
         <div style="font-weight:700;margin-bottom:6px;color:#0f172a;">🔍 命中的知识片段 (${sources.length} 条)：</div>
         ${sources.length ? sources.map((s, idx) => `
           <div style="background:#ffffff;padding:8px 10px;border-radius:6px;border:1px solid #e2e8f0;margin-bottom:6px;font-size:12px;">
-            <strong>[${idx + 1}] ${s.heading || '知识点'}</strong>: ${s.content}
+            <strong>[${idx + 1}] ${escapeHtml(s.heading || '知识点')}</strong>: ${escapeHtml(s.content)}
           </div>
         `).join('') : '<div style="color:#94a3b8;font-size:12px;">未命中特定文档，将直接基于业务画像与通用常识作答（安全兜底）</div>'}
       `;
     } catch (e) {
-      resultBox.innerHTML = `<span style="color:#ef4444;">检索失败: ${e.message}</span>`;
+      resultBox.innerHTML = `<span style="color:#ef4444;">检索失败: ${escapeHtml(e.message)}</span>`;
     }
   });
 
@@ -439,17 +471,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         headers: { 'Authorization': `Bearer ${config.workspaceToken || ''}` }
       });
       const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
       if (!data.items || !data.items.length) {
         tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:24px;">暂无已配置的标准问答对，在上方添加即可生效</td></tr>';
         return;
       }
       tbody.innerHTML = data.items.map(faq => `
         <tr>
-          <td style="font-weight:600;">${faq.question}</td>
-          <td>${faq.answer}</td>
-          <td><span class="status-pill">${faq.keywords || '智能匹配'}</span></td>
+          <td style="font-weight:600;">${escapeHtml(faq.question)}</td>
+          <td>${escapeHtml(faq.answer)}</td>
+          <td><span class="status-pill">${escapeHtml(faq.keywords || '智能匹配')}</span></td>
           <td>
-            <button class="btn btn-secondary btn-sm btn-delete-faq" data-id="${faq.id}">删除</button>
+            <button class="btn btn-secondary btn-sm btn-delete-faq" data-id="${escapeHtml(faq.id)}">删除</button>
           </td>
         </tr>
       `).join('');
@@ -461,12 +494,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken || ''}` },
             body: JSON.stringify({ id: btn.dataset.id })
+          }).then(async response => {
+            const data = await readJson(response);
+            if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
           });
           loadFaqs();
         });
       });
     } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#ef4444;padding:16px;">加载失败: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#ef4444;padding:16px;">加载失败: ${escapeHtml(e.message)}</td></tr>`;
     }
   }
 
@@ -503,21 +539,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         headers: { 'Authorization': `Bearer ${config.workspaceToken || ''}` }
       });
       const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
       if (!data.items || !data.items.length) {
         tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:24px;">暂无捕获客资。当客户在小红书发送手机号或微信号时，将自动汇总至此。</td></tr>';
         return;
       }
       tbody.innerHTML = data.items.map(lead => `
         <tr>
-          <td style="font-weight:600;">${lead.user_name || '小红书用户'}</td>
-          <td><span class="status-pill ${lead.lead_type === '手机号' ? 'online' : 'warning'}">${lead.lead_type}</span></td>
-          <td style="font-family:monospace;font-weight:700;">${lead.lead_value}</td>
-          <td style="color:var(--text-muted);font-size:12px;">${lead.context_summary || '私信留资'}</td>
+          <td style="font-weight:600;">${escapeHtml(lead.user_name || '小红书用户')}</td>
+          <td><span class="status-pill ${lead.lead_type === '手机号' ? 'online' : 'warning'}">${escapeHtml(lead.lead_type)}</span></td>
+          <td style="font-family:monospace;font-weight:700;">${escapeHtml(lead.lead_value)}</td>
+          <td style="color:var(--text-muted);font-size:12px;">${escapeHtml(lead.context_summary || '私信留资')}</td>
           <td style="color:var(--text-muted);font-size:12px;">${lead.created_at ? new Date(lead.created_at).toLocaleString('zh-CN') : '-'}</td>
         </tr>
       `).join('');
     } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#ef4444;padding:16px;">加载失败: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#ef4444;padding:16px;">加载失败: ${escapeHtml(e.message)}</td></tr>`;
     }
   }
 
@@ -556,19 +593,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         headers: { 'Authorization': `Bearer ${config.workspaceToken || ''}` }
       });
       const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
       if (!data.items || !data.items.length) {
         box.innerHTML = '暂无已沉淀的人工案例。在小红书客服工作台中修改草稿并点击「记住当前人工话术」，即会自动沉淀至此。';
         return;
       }
       box.innerHTML = data.items.map(item => `
         <div style="background:#ffffff;border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px;">
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">客户：${item.latest_msg}</div>
-          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;">采用回复：${item.human_reply}</div>
-          <div style="font-size:12px;color:var(--primary);">策略理由：${item.reason || 'AI 自动总结优质表达'}</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">客户：${escapeHtml(item.latest_msg)}</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;">采用回复：${escapeHtml(item.human_reply)}</div>
+          <div style="font-size:12px;color:var(--primary);">策略理由：${escapeHtml(item.reason || 'AI 自动总结优质表达')}</div>
         </div>
       `).join('');
     } catch (e) {
-      box.innerHTML = `<span style="color:#ef4444;">加载失败: ${e.message}</span>`;
+      box.innerHTML = `<span style="color:#ef4444;">加载失败: ${escapeHtml(e.message)}</span>`;
     }
   }
 

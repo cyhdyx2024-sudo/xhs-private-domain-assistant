@@ -1,19 +1,25 @@
 document.addEventListener('DOMContentLoaded', async () => {
   const $ = id => document.getElementById(id);
+  const Safety = globalThis.XhsSafety;
   const storageGet = keys => new Promise(resolve => chrome.storage.local.get(keys, resolve));
   const storageSet = values => new Promise(resolve => chrome.storage.local.set(values, resolve));
 
-  const keys = ['onboardingComplete', 'enabled', 'runMode', 'timeScope', 'fullAutoArmedAt', 'repliedCount', 'leadsCount'];
+  const keys = ['onboardingComplete', 'enabled', 'runMode', 'timeScope', 'fullAutoArmedAt', 'operatorAway', 'repliedCount', 'leadsCount', 'statsDate'];
   let config = await storageGet(keys);
+  const dailyStats = Safety.normalizeDailyStats(config);
+  if (dailyStats.statsDate !== config.statsDate) {
+    await storageSet(dailyStats);
+    config = { ...config, ...dailyStats };
+  }
 
   function updateStatus() {
     const on = $('masterToggle').checked;
-    $('headerStatus').textContent = on ? '运行中' : '已暂停';
+    $('headerStatus').textContent = !config.onboardingComplete ? '待配置' : (on ? '运行中' : '已暂停');
     $('headerStatus').style.color = on ? '#10b981' : '#f59e0b';
-    $('switchDesc').textContent = !on ? '已暂停，不读取、不生成、不发送' : ($('runMode').value === 'full_auto' ? '全自动已武装；人工操作时暂停' : '半自动副驾：只预填，人工确认发送');
+    $('switchDesc').textContent = !config.onboardingComplete ? '请先打开完整管理控制台完成首次设置' : (!on ? '已暂停，不读取、不生成、不发送' : ($('runMode').value === 'full_auto' ? '请在工作台点击“开始无人值守”后运行' : '半自动副驾：只预填，人工确认发送'));
   }
 
-  $('masterToggle').checked = config.enabled !== false;
+  $('masterToggle').checked = Boolean(config.onboardingComplete && config.enabled === true);
   $('runMode').value = config.runMode || 'copilot';
   $('timeScope').value = config.timeScope || 'all_day';
   $('todayReplied').textContent = config.repliedCount || 0;
@@ -26,12 +32,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function saveRuntime() {
+    if (!config.onboardingComplete) {
+      $('masterToggle').checked = false;
+      $('runMode').value = 'copilot';
+      await storageSet({ enabled: false, runMode: 'copilot', fullAutoArmedAt: 0, operatorAway: false });
+      updateStatus();
+      if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
+      return;
+    }
     if ($('runMode').value === 'full_auto' && !$('masterToggle').checked) $('runMode').value = 'copilot';
     const patch = {
       enabled: $('masterToggle').checked,
       runMode: $('runMode').value,
       timeScope: $('timeScope').value,
-      fullAutoArmedAt: $('masterToggle').checked && $('runMode').value === 'full_auto' ? Date.now() : 0
+      fullAutoArmedAt: 0,
+      operatorAway: false
     };
     await storageSet(patch);
     config = { ...config, ...patch };
