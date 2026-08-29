@@ -808,9 +808,12 @@ def resolve_model_config(headers: Any) -> dict:
     header_url = str(headers.get("X-Model-Base-Url") or "").strip()
     header_key = str(headers.get("X-Model-Key") or "").strip()
     header_model = str(headers.get("X-Model-Name") or "").strip()
-    url = header_url or OPENCODEX_URL
-    key = header_key or OPENCODEX_API_KEY
-    model = header_model or OPENCODEX_MODEL
+    if not header_key:
+        # 没有客户 Key 就是不带 BYOK：完全使用服务端自身网关配置，
+        # 绝不把服务端 Key 转发到调用方指定的地址。
+        url, key, model = OPENCODEX_URL, OPENCODEX_API_KEY, OPENCODEX_MODEL
+    else:
+        url, key, model = header_url, header_key, header_model
     parsed = urlparse(url)
     if PRODUCT_MODE:
         # 商用模式是明确的 BYOK：不能悄悄回退到服务器内部模型或密钥。

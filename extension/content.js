@@ -14,8 +14,8 @@
     repliedCount: 0, leadsCount: 0, statsDate: '', contactBlacklist: [],
     processedMap: {}, hourlySendTimestamps: [], uncertainSendMap: {},
     bridgeUrl: 'http://127.0.0.1:18195', workspaceToken: '', accountId: '',
-    knowledgeScope: 'default', modelBaseUrl: 'https://api.openai.com/v1/chat/completions',
-    modelName: 'gpt-4.1-mini', modelApiKey: '', embeddingBaseUrl: '', embeddingModel: '', embeddingApiKey: '',
+    knowledgeScope: 'default', modelBaseUrl: '',
+    modelName: '', modelApiKey: '', embeddingBaseUrl: '', embeddingModel: '', embeddingApiKey: '',
     feishuAppId: '', feishuAppSecret: '',
     monitor: { lastLlmAt: 0, lastLlmLatencyMs: 0, llmSuccessCount: 0, llmFailureCount: 0,
       sendSuccessCount: 0, sendFailureCount: 0, readbackFailureCount: 0, lastError: '' }
