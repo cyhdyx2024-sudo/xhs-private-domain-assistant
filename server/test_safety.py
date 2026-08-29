@@ -50,6 +50,19 @@ class ProductSafetyTest(unittest.TestCase):
         )
         self.assertNotIn("当前会话无法核验外部动作状态，回复却声称已经完成", issues)
 
+    def test_product_mode_is_secure_default(self):
+        self.assertTrue(agent.PRODUCT_MODE, "默认必须开启产品模式（BYOK），防止本地 Bridge 变成开放代理")
+
+    def test_cors_origin_allowlist(self):
+        handler = object.__new__(agent.HttpHandler)
+        for trusted in ["https://pro.xiaohongshu.com", "https://www.xiaohongshu.com",
+                        "chrome-extension://abcdefghijklmnop", "http://127.0.0.1:5173", ""]:
+            handler.headers = {"Origin": trusted} if trusted else {}
+            self.assertEqual(handler._cors_origin(), trusted or "", f"可信来源应回显: {trusted}")
+        for untrusted in ["https://evil.com", "https://evil-xiaohongshu.com", "http://192.168.1.9:8080"]:
+            handler.headers = {"Origin": untrusted}
+            self.assertEqual(handler._cors_origin(), "", f"不可信来源应拒绝: {untrusted}")
+
     def test_product_mode_requires_explicit_byok_headers(self):
         with patch.object(agent, "PRODUCT_MODE", True):
             with self.assertRaisesRegex(ValueError, "model_api_key_required"):

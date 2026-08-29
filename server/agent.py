@@ -135,7 +135,7 @@ from urllib.parse import parse_qs, urlparse
 OPENCODEX_URL = os.environ.get("OPENCODEX_URL", "http://127.0.0.1:10100/v1/chat/completions")
 OPENCODEX_API_KEY = os.environ.get("OPENCODEX_API_KEY", "")
 OPENCODEX_MODEL = os.environ.get("OPENCODEX_MODEL", "google-antigravity/gemini-3.7-flash")
-PRODUCT_MODE = os.environ.get("XHS_PRODUCT_MODE", "0") == "1"
+PRODUCT_MODE = os.environ.get("XHS_PRODUCT_MODE", "1") == "1"
 ALLOWED_MODEL_HOSTS = {
     host.strip().lower() for host in os.environ.get(
         "XHS_ALLOWED_MODEL_HOSTS",
@@ -863,6 +863,8 @@ def call_llm_dynamic(
     tenant: dict | None = None,
     model_config: dict | None = None,
     embedding_config: dict | None = None,
+    fallback_text: str = "",
+    temperature: float = 0.55,
 ) -> tuple[str, int, list[dict]]:
     context_lines = []
     for turn in turns[-12:]:
@@ -885,7 +887,10 @@ def call_llm_dynamic(
         "auto_reply": "这是自动回复：只有充分确定上下文时才作答，宁可简短澄清，也不要猜测。",
         "manual_followup": "这是人工主动生成跟进草稿：避免重复上一轮，给出一个自然的后续动作。",
         "reply": "这是副驾回复草稿：准确承接客户最后一条未回复消息。",
+        "rewrite_fallback": "上一版草稿被判定为模板腔。请在保持信息准确的前提下，用更自然、更具体的口语重写一版，不要复用原句式。",
     }.get(action, "准确承接客户最后一条消息。")
+    if action == "rewrite_fallback" and fallback_text:
+        action_note += f"\n待重写的原草稿：{clean_analysis_text(fallback_text, 200)}"
     if _is_external_action_status_check(latest_msg):
         action_note += (
             " 客户正在追问添加、发送、申请或通过等外部动作状态。当前会话不能证明动作是否完成；"
@@ -929,7 +934,7 @@ def call_llm_dynamic(
             {"role": "system", "content": build_system_prompt(tenant)},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.55,
+        "temperature": min(0.8, max(0.2, float(temperature) or 0.55)),
         # 该网关把模型的内部推理 token 也计入 max_tokens；过小会把正文截在半句话。
         "max_tokens": 800
     }
@@ -952,7 +957,7 @@ def call_llm_dynamic(
             ]
             reply = request_once(retry_payload)
         sources = [{key: item[key] for key in ("document_id", "title", "source_type", "source_uri", "version", "score")} for item in knowledge_hits]
-        return (reply if len(reply) >= 24 else "", len(examples), sources)
+        return (reply if len(reply) >= 6 else "", len(examples), sources)
     except Exception as e:
         print(f"[LLM Error] {e}")
         return "", 0, []
@@ -1136,16 +1141,40 @@ class HttpHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors()
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Model-Key, X-Model-Base-Url, X-Model-Name, X-Embedding-Key, X-Embedding-Base-Url, X-Embedding-Model, X-Feishu-App-Id, X-Feishu-App-Secret")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
+    def _cors_origin(self) -> str:
+        """只对可信来源回显 CORS：本机 Bridge 绝不能变成任意网页可读的开放代理。"""
+        origin = str(self.headers.get("Origin") or "").strip()
+        if not origin:
+            return ""
+        try:
+            parsed = urlparse(origin)
+            host = (parsed.hostname or "").lower()
+        except Exception:
+            return ""
+        if parsed.scheme == "chrome-extension":
+            return origin
+        if parsed.scheme == "http" and host in ("127.0.0.1", "localhost"):
+            return origin
+        if parsed.scheme == "https" and (host == "xiaohongshu.com" or host.endswith(".xiaohongshu.com")):
+            return origin
+        return ""
+
+    def _send_cors(self) -> None:
+        origin = self._cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+
     def do_OPTIONS(self) -> None:
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors()
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Model-Key, X-Model-Base-Url, X-Model-Name, X-Embedding-Key, X-Embedding-Base-Url, X-Embedding-Model, X-Feishu-App-Id, X-Feishu-App-Secret")
         self.end_headers()
@@ -1208,8 +1237,8 @@ class HttpHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
             self.send_header("Content-Disposition", "attachment; filename=leads_export.csv")
+            self._send_cors()
             self.send_header("Content-Length", str(len(csv_body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(csv_body)
@@ -1388,6 +1417,17 @@ class HttpHandler(BaseHTTPRequestHandler):
             action = payload.get("action") or "reply"
             knowledge_scope = scope
 
+            # /reply 会真实消耗模型额度：拒绝可信来源之外的浏览器跨域调用，防止被任意网页白嫖。
+            origin = str(self.headers.get("Origin") or "").strip()
+            if origin and not self._cors_origin():
+                self._send_json(403, {"ok": False, "error": "origin_not_allowed"})
+                return
+
+            try:
+                temperature = min(0.8, max(0.2, float(payload.get("temperature") or (0.3 if action == "rewrite_fallback" else 0.55))))
+            except (TypeError, ValueError):
+                temperature = 0.55
+
             try:
                 model_config = resolve_model_config(self.headers)
                 embedding_config = resolve_embedding_config(self.headers, model_config)
@@ -1398,6 +1438,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             llm_reply, memory_hits, knowledge_sources = call_llm_dynamic(
                 user_name, latest_msg, turns, user_msgs, bot_msgs, shared_cards, action,
                 knowledge_scope, tenant=tenant, model_config=model_config, embedding_config=embedding_config,
+                fallback_text=str(payload.get("fallback_text") or ""), temperature=temperature,
             )
             quality_issues = reply_quality_issues(latest_msg, turns, llm_reply)
             if quality_issues:
