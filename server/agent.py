@@ -133,6 +133,77 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import shutil
+import subprocess
+
+# 评论区雷达依赖本机 xhs CLI（xiaohongshu-cli，逆向签名接口）。
+# 路径可用 XHS_CLI_BIN 覆盖；CLI 需已通过 `xhs login` 登录。
+XHS_CLI_BIN = os.environ.get("XHS_CLI_BIN", shutil.which("xhs") or "xhs")
+
+
+def _xhs_cli(*args: str, timeout: int = 90) -> dict:
+    result = subprocess.run(
+        [XHS_CLI_BIN, *args, "--json"],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    output = result.stdout.strip() or result.stderr.strip()
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        raise ValueError(f"xhs CLI 输出异常: {output[:200]}")
+
+
+def _extract_note_token(search_payload: dict, note_id: str) -> tuple[str, str]:
+    for item in search_payload.get("data", {}).get("items", []):
+        item_id = item.get("id") or item.get("note_card", {}).get("note_id")
+        if item_id == note_id:
+            token = item.get("xsec_token") or item.get("note_card", {}).get("xsec_token", "")
+            source = item.get("xsec_source") or "pc_search"
+            return token, source
+    raise ValueError("搜索结果里没找到这条笔记，换个关键词试试")
+
+
+def fetch_note_comments(note_ref: str) -> dict:
+    """输入笔记 ID / 带参数的笔记链接 / 搜索关键词，返回真实评论列表。"""
+    note_ref = (note_ref or "").strip()
+    if not note_ref:
+        raise ValueError("请输入笔记链接、笔记 ID 或搜索关键词")
+    parsed = urlparse(note_ref if "://" in note_ref else f"https://www.xiaohongshu.com/explore/{note_ref}")
+    note_id = None
+    token = parse_qs(parsed.query).get("xsec_token", [""])[0]
+    if re.search(r"/(explore|discovery)/([0-9a-f]{12,})", parsed.path):
+        note_id = re.search(r"/(explore|discovery)/([0-9a-f]{12,})", parsed.path).group(2)
+    elif re.fullmatch(r"[0-9a-f]{12,}", note_ref):
+        note_id = note_ref
+    if note_id and token:
+        result = _xhs_cli("comments", note_id, "--xsec-token", token)
+        if result.get("ok"):
+            return result.get("data", {})
+    if note_id:
+        # 直接读一次以建立上下文缓存，再尝试拉评论
+        try:
+            _xhs_cli("read", note_id)
+            result = _xhs_cli("comments", note_id)
+            if result.get("ok"):
+                return result.get("data", {})
+        except (ValueError, subprocess.TimeoutExpired):
+            pass
+    # 兜底：把输入当搜索关键词，从搜索结果里解析出笔记和 token
+    search_payload = _xhs_cli("search", note_ref)
+    search_note_id, token_source = None, ""
+    for item in search_payload.get("data", {}).get("items", []):
+        candidate = item.get("id") or item.get("note_card", {}).get("note_id")
+        if candidate:
+            search_note_id, token_source = candidate, item.get("xsec_token") or item.get("note_card", {}).get("xsec_token", "")
+            break
+    if not search_note_id or not token_source:
+        raise ValueError("搜索没有返回可用结果，请换关键词或直接粘贴带 xsec_token 的笔记链接")
+    result = _xhs_cli("comments", search_note_id, "--xsec-token", token_source)
+    if not result.get("ok"):
+        raise ValueError(result.get("error", {}).get("message", "评论拉取失败"))
+    return result.get("data", {})
+
+
 OPENCODEX_URL = os.environ.get("OPENCODEX_URL", "http://127.0.0.1:10100/v1/chat/completions")
 OPENCODEX_API_KEY = os.environ.get("OPENCODEX_API_KEY", "")
 OPENCODEX_MODEL = os.environ.get("OPENCODEX_MODEL", "google-antigravity/gemini-3.7-flash")
@@ -1067,6 +1138,7 @@ def call_llm_dynamic(
         "auto_reply": "这是自动回复：只有充分确定上下文时才作答，宁可简短澄清，也不要猜测。",
         "manual_followup": "这是人工主动生成跟进草稿：避免重复上一轮，给出一个自然的后续动作。",
         "reply": "这是副驾回复草稿：准确承接客户最后一条未回复消息。",
+        "comment_reply": "这是笔记评论区的公开回复：像作者顺手回粉丝一样简短自然（20~60字），只回应这条评论本身；不得推销过度、不得直接索要联系方式，可用轻量引导（如'私信你啦'）。",
         "rewrite_fallback": "上一版草稿被判定为模板腔。请在保持信息准确的前提下，用更自然、更具体的口语重写一版，不要复用原句式。",
     }.get(action, "准确承接客户最后一条消息。")
     if action == "rewrite_fallback" and fallback_text:
@@ -1468,7 +1540,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             self._send_json(201, {"ok": True, **result})
             return
 
-        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/tenant/webhook", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/leads/delete", "/leads/clear"}:
+        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/tenant/webhook", "/comments/list", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/leads/delete", "/leads/clear"}:
             tenant = self._tenant()
             if PRODUCT_MODE and not tenant:
                 return
@@ -1534,6 +1606,26 @@ class HttpHandler(BaseHTTPRequestHandler):
                     return
                 set_tenant_webhook(tenant["id"], webhook_url)
                 self._send_json(200, {"ok": True, "webhook_url": webhook_url})
+                return
+
+            if path == "/comments/list":
+                try:
+                    data = fetch_note_comments(str(payload.get("note") or ""))
+                    comments = []
+                    for c in data.get("comments", []):
+                        user = c.get("user_info", {}) or {}
+                        comments.append({
+                            "id": c.get("id"),
+                            "author": user.get("nickname") or user.get("nickname_red_id") or "匿名",
+                            "location": c.get("ip_location") or "",
+                            "content": c.get("content") or "",
+                            "likes": c.get("like_count") or 0,
+                            "time": c.get("create_time") or "",
+                            "sub_count": c.get("sub_comment_count") or 0,
+                        })
+                    self._send_json(200, {"ok": True, "comments": comments, "has_more": bool(data.get("has_more")), "cursor": data.get("cursor") or ""})
+                except (ValueError, subprocess.TimeoutExpired) as error:
+                    self._send_json(502, {"ok": False, "error": str(error)})
                 return
 
             if path in {"/knowledge/upload", "/knowledge/feishu", "/knowledge/status"}:

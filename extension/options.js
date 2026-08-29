@@ -567,6 +567,96 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   $('btnRefreshLeads').addEventListener('click', loadLeads);
 
+  // 评论雷达
+  $('btnLoadComments').addEventListener('click', async () => {
+    const status = $('commentsStatus');
+    const list = $('commentsList');
+    const query = $('commentQuery').value.trim();
+    if (!query) { status.textContent = '请先输入笔记链接、ID 或关键词'; return; }
+    status.textContent = '正在拉取评论（含搜索解析，约 10~30 秒）...';
+    list.innerHTML = '';
+    try {
+      const res = await fetch(`${SERVICE_URL}/comments/list`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken || ''}` },
+        body: JSON.stringify({ note: query })
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const comments = data.comments || [];
+      if (!comments.length) { status.textContent = '这条笔记暂时没有评论'; return; }
+      status.textContent = `共 ${comments.length} 条评论${data.has_more ? '（还有更多未拉取）' : ''}`;
+      comments.forEach((c) => list.appendChild(renderCommentRow(c)));
+    } catch (error) {
+      status.textContent = `❌ ${error.message}`;
+    }
+  });
+
+  function renderCommentRow(c) {
+    const row = document.createElement('div');
+    row.style.cssText = 'border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:13px;';
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:4px;';
+    const author = document.createElement('b');
+    author.textContent = c.author || '匿名';
+    const meta = document.createElement('span');
+    meta.style.cssText = 'color:#94a3b8;font-size:11px;';
+    meta.textContent = [c.location, c.likes ? `赞 ${c.likes}` : '', c.sub_count ? `回复 ${c.sub_count}` : ''].filter(Boolean).join(' · ');
+    const draftBtn = document.createElement('button');
+    draftBtn.className = 'btn btn-secondary btn-sm';
+    draftBtn.textContent = '✨ AI 草稿';
+    draftBtn.style.marginLeft = 'auto';
+    head.append(author, meta, draftBtn);
+    const body = document.createElement('div');
+    body.style.cssText = 'white-space:pre-wrap;color:#334155;margin-bottom:6px;';
+    body.textContent = c.content || '（无文字内容）';
+    const draftBox = document.createElement('div');
+    draftBox.style.display = 'none';
+    draftBox.style.cssText += 'background:#f8fafc;border-radius:8px;padding:8px 10px;margin-top:6px;';
+    const draftText = document.createElement('div');
+    draftText.style.cssText = 'white-space:pre-wrap;color:#0f172a;';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'btn btn-primary btn-sm';
+    copyBtn.textContent = '📋 复制草稿';
+    copyBtn.style.marginTop = '6px';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(draftText.textContent || '').then(() => {
+        copyBtn.textContent = '✓ 已复制，去小红书回复';
+        setTimeout(() => { copyBtn.textContent = '📋 复制草稿'; }, 2000);
+      });
+    });
+    draftBox.append(draftText, copyBtn);
+    draftBtn.addEventListener('click', async () => {
+      if (!config.workspaceToken) { draftText.textContent = '❌ 请先保存一次全局配置'; draftBox.style.display = 'block'; return; }
+      draftBtn.disabled = true;
+      draftBtn.textContent = '生成中…';
+      draftBox.style.display = 'block';
+      try {
+        const res = await fetch(`${SERVICE_URL}/reply`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken}` },
+          body: JSON.stringify({
+            session_id: `comment:${c.id || Date.now()}`,
+            user_name: c.author || '',
+            action: 'comment_reply',
+            latest_msg: c.content || ''
+          })
+        });
+        const data = await res.json();
+        if (!data.ok || !data.reply) throw new Error(data.error || `HTTP ${res.status}`);
+        draftText.textContent = data.reply;
+        copyBtn.style.display = 'inline-block';
+      } catch (error) {
+        draftText.textContent = `❌ 生成失败：${error.message}`;
+      }
+      draftBtn.disabled = false;
+      draftBtn.textContent = '✨ 重新生成';
+    });
+    row.append(head, body, draftBox);
+    return row;
+  }
+
+
   // 今日经营战报
   async function loadTodayReport() {
     if (!config.workspaceToken) return;

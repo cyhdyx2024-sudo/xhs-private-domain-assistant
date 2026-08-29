@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "小红书私信智能自动回复助手 (XHS Auto-Reply Pro)",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "适配专业号客服工作台的上下文私信副驾、多模型支持、专业知识库Studio、夜间值守与线索捕获助手",
   "icons": {
     "16": "icon16.png",
@@ -58,7 +58,8 @@
       ],
       "js": [
         "safety.js",
-        "content.js"
+        "content.js",
+        "comment-copilot.js"
       ],
       "css": [
         "floating-dock.css"

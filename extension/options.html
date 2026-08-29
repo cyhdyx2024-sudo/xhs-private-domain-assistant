@@ -365,6 +365,20 @@
         <div class="card">
           <div class="card-header">
             <div>
+              <div class="card-title">💬 评论雷达</div>
+              <div class="card-desc">输入笔记链接、ID 或关键词，拉取全部真实评论；每条可一键生成 AI 公开回复草稿（复制后到小红书 App/网页确认发送）。</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <input class="form-input" id="commentQuery" type="text" placeholder="粘贴笔记链接 / 笔记 ID / 搜索关键词" style="flex:1;">
+            <button class="btn btn-primary btn-sm" id="btnLoadComments">🔍 拉取评论</button>
+          </div>
+          <div id="commentsStatus" style="font-size:12px;color:#64748b;margin-top:8px;">需要本机已登录 xhs CLI（`xhs login`）。</div>
+          <div id="commentsList" style="margin-top:10px;display:flex;flex-direction:column;gap:10px;max-height:480px;overflow:auto;"></div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div>
               <div class="card-title">🔔 线索流失警报</div>
               <div class="card-desc">客户一留手机号/微信号，立刻推送到飞书或企业微信群（群机器人 Webhook），不错过任何一条热线索。支持飞书（open.feishu.cn）与企微（qyapi.weixin.qq.com）机器人地址。</div>
             </div>
