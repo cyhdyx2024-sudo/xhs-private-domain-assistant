@@ -168,7 +168,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // 3. Save Local Config
       const newConfig = {
-        configVersion: '1.0.1',
+        configVersion: '1.0.2',
         onboardingComplete: true,
         enabled: $('masterToggle').value === 'true',
         runMode: $('runMode').value,

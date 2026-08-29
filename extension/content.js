@@ -6,7 +6,7 @@
   'use strict';
   if (window.top !== window) return;
 
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
   const Safety = globalThis.XhsSafety;
   const DEFAULTS = {
     enabled: false, onboardingComplete: false, runMode: 'copilot', timeScope: 'all_day', fullAutoArmedAt: 0, operatorAway: false,

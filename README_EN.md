@@ -44,22 +44,25 @@ Customer Service Webpage (Browser DOM)
 
 ## 🚀 Quick Start
 
-### 1. Install Chrome Extension
+### 1. Run the LLM Bridge (self-hosted by default)
 
-1. Download the latest `xhs-private-domain-assistant-v1.0.1.zip` from [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases).
+The extension connects to `http://127.0.0.1:18195` out of the box. Start the bridge locally with zero dependencies:
+
+```bash
+cd server
+cp .env.example .env   # adjust upstream model config if needed
+python3 agent.py       # listens on http://127.0.0.1:18195
+```
+
+For team deployments, host the bridge on your own server behind an HTTPS reverse proxy and point the extension settings at it. Nothing is sent to any third-party service by default.
+
+### 2. Install Chrome Extension
+
+1. Download the latest `xhs-private-domain-assistant-v1.0.2.zip` from [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases), or use the `extension/` folder from this repo directly.
 2. Unzip the downloaded file.
 3. Open Chrome and navigate to `chrome://extensions/`, enable **Developer mode** in the top-right corner.
 4. Click **Load unpacked** and select the `extension` folder.
 5. Open the extension Studio dashboard to configure your API Key and business profile.
-
-### 2. Run Self-Hosted Gateway (Optional)
-
-```bash
-cd server
-cp .env.example .env
-# Install dependencies and start gateway
-python3 agent.py --port 18195
-```
 
 ---
 
