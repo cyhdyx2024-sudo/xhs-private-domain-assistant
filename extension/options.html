@@ -324,6 +324,21 @@
         <div class="card">
           <div class="card-header">
             <div>
+              <div class="card-title">今日经营战报</div>
+              <div class="card-desc">AI 接待量、新增线索与客户在问什么——不用盯后台，一眼看清获客盘子。</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btnRefreshReport">🔄 刷新战报</button>
+          </div>
+          <div id="reportBox" style="display:flex;gap:12px;flex-wrap:wrap;font-size:13px;">
+            <div style="flex:1;min-width:120px;background:#f8fafc;border-radius:10px;padding:14px;text-align:center;"><div style="font-size:22px;font-weight:700;color:#0f172a;" id="statReplies">-</div><div style="color:#64748b;margin-top:4px;">今日 AI 回复</div></div>
+            <div style="flex:1;min-width:120px;background:#fff7ed;border-radius:10px;padding:14px;text-align:center;"><div style="font-size:22px;font-weight:700;color:#ea580c;" id="statLeads">-</div><div style="color:#64748b;margin-top:4px;">今日新增线索</div></div>
+            <div style="flex:1;min-width:120px;background:#f0fdf4;border-radius:10px;padding:14px;text-align:center;"><div style="font-size:22px;font-weight:700;color:#16a34a;" id="statLatency">-</div><div style="color:#64748b;margin-top:4px;">平均回复耗时</div></div>
+            <div style="flex:2;min-width:200px;background:#f8fafc;border-radius:10px;padding:14px;"><div style="color:#64748b;margin-bottom:6px;">客户在问</div><div id="statIntents" style="font-weight:600;color:#0f172a;">-</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div>
               <div class="card-title">捕获客资与线索汇总</div>
               <div class="card-desc">AI 在私信沟通过程中自动识别并提取的意向客户手机号与微信号。</div>
             </div>
@@ -346,6 +361,24 @@
               <tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:24px;">暂无捕获客资</td></tr>
             </tbody>
           </table>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">🔔 线索流失警报</div>
+              <div class="card-desc">客户一留手机号/微信号，立刻推送到飞书或企业微信群（群机器人 Webhook），不错过任何一条热线索。支持飞书（open.feishu.cn）与企微（qyapi.weixin.qq.com）机器人地址。</div>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div class="form-group" style="grid-column:1/-1;">
+              <label class="form-label" for="alertWebhook">群机器人 Webhook 地址</label>
+              <input class="form-input" id="alertWebhook" type="url" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/... 或 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button class="btn btn-primary btn-sm" id="btnSaveWebhook">💾 保存警报地址</button>
+            <span id="webhookStatus" style="align-self:center;font-size:12px;color:#64748b;"></span>
+          </div>
         </div>
       </section>
 

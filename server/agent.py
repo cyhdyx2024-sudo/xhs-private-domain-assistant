@@ -122,11 +122,12 @@ import secrets
 import sqlite3
 import subprocess
 import time
+import threading
 import urllib.request
 import urllib.error
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -150,6 +151,11 @@ FEEDBACK_DB = Path(os.environ.get(
 # 注册接口应用层限流：自托管直连(无 nginx)时兜底防工作区表被灌爆。
 REGISTER_MAX_PER_MINUTE = 10
 REGISTER_HITS: dict[str, list[float]] = {}
+
+# 线索警报与日报：webhook 兼容飞书群机器人 / 企微群机器人；
+# 租户级 webhook_url 优先，未配置时回退到服务端全局值。
+ALERT_WEBHOOK = os.environ.get("XHS_ALERT_WEBHOOK", "")
+REPORT_HOUR = int(os.environ.get("XHS_REPORT_HOUR", "13") or 13)
 
 SYSTEM_PROMPT = """你是小红书私信顾问。你的目标不是套模板索要联系方式，而是先看懂这位客户刚刚说了什么，再自然推进下一步。
 
@@ -300,6 +306,177 @@ def init_feedback_db() -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_tenant ON knowledge_chunks(tenant_id, document_id)")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tenants)").fetchall()}
+        if "webhook_url" not in columns:
+            conn.execute("ALTER TABLE tenants ADD COLUMN webhook_url TEXT NOT NULL DEFAULT ''")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reply_log (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                user_name TEXT NOT NULL DEFAULT '',
+                latest_msg TEXT NOT NULL DEFAULT '',
+                reply TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT '',
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_reply_log_created ON reply_log(created_at DESC)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_log (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                ref_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(tenant_id, kind, ref_id)
+            )
+        """)
+
+
+def log_reply(tenant_id: str, session_id: str, user_name: str, latest_msg: str, reply: str, action: str, latency_ms: int) -> None:
+    try:
+        with sqlite3.connect(FEEDBACK_DB) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO reply_log (id, tenant_id, session_id, user_name, latest_msg, reply, action, latency_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (f"r_{secrets.token_hex(10)}", tenant_id or "", session_id or "", user_name or "",
+                 clean_analysis_text(latest_msg, 300), clean_analysis_text(reply, 500), action or "reply", int(latency_ms),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+    except Exception as error:
+        print(f"[Reply Log Error] {error}")
+
+
+def set_tenant_webhook(tenant_id: str, webhook_url: str) -> None:
+    with sqlite3.connect(FEEDBACK_DB) as conn:
+        conn.execute("UPDATE tenants SET webhook_url=?, updated_at=? WHERE id=?",
+                     (clean_analysis_text(webhook_url, 300), datetime.now(timezone.utc).isoformat(), tenant_id))
+
+
+def get_tenant_webhook(tenant: dict | None) -> str:
+    if tenant:
+        with sqlite3.connect(FEEDBACK_DB) as conn:
+            row = conn.execute("SELECT webhook_url FROM tenants WHERE id=?", (tenant["id"],)).fetchone()
+            if row:
+                return row[0] or ""
+    return ALERT_WEBHOOK
+
+
+def push_webhook(webhook_url: str, text: str) -> bool:
+    """同时兼容飞书群机器人与企微群机器人的文本消息格式。"""
+    if not webhook_url:
+        return False
+    try:
+        if "qyapi.weixin.qq.com" in webhook_url:
+            payload = {"msgtype": "text", "text": {"content": text[:1800]}}
+        else:
+            payload = {"msg_type": "text", "content": {"text": text[:1800]}}
+        request = urllib.request.Request(webhook_url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=8) as response:
+            return 200 <= response.status < 300
+    except Exception as error:
+        print(f"[Webhook Error] {error}")
+        return False
+
+
+def alert_once(tenant_id: str, kind: str, ref_id: str, text: str, webhook_url: str) -> bool:
+    """推送一次提醒；同租户同类型同对象只提醒一次。"""
+    try:
+        with sqlite3.connect(FEEDBACK_DB) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO alert_log (id, tenant_id, kind, ref_id, created_at) VALUES (?,?,?,?,?)",
+                (f"a_{secrets.token_hex(10)}", tenant_id, kind, ref_id, datetime.now(timezone.utc).isoformat()),
+            )
+            sent = conn.total_changes
+        if sent:
+            return push_webhook(webhook_url, text)
+        return False
+    except Exception as error:
+        print(f"[Alert Error] {error}")
+        return False
+
+
+def today_stats(tenant: dict | None) -> dict:
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    tenant_id = tenant["id"] if tenant else ""
+    lead_where, reply_where = ("WHERE tenant_id=?", "WHERE tenant_id=?") if tenant_id else ("WHERE 1=1", "WHERE 1=1")
+    lead_params: tuple = (tenant_id, day_start) if tenant_id else (day_start,)
+    reply_params: tuple = (tenant_id, day_start) if tenant_id else (day_start,)
+    with sqlite3.connect(FEEDBACK_DB) as conn:
+        leads_today = conn.execute(f"SELECT COUNT(*) FROM tenant_leads {lead_where} AND created_at>=?", lead_params).fetchone()[0]
+        replies_today, avg_latency = conn.execute(
+            f"SELECT COUNT(*), COALESCE(AVG(latency_ms),0) FROM reply_log {reply_where} AND created_at>=?", reply_params
+        ).fetchone()
+        recent_messages = [row[0] for row in conn.execute(
+            "SELECT latest_msg FROM reply_log WHERE created_at>=? ORDER BY created_at DESC LIMIT 50", (day_start,)
+        ).fetchall()]
+    buckets: dict[str, int] = {}
+    for message in recent_messages:
+        bucket = detect_intent_bucket(message)
+        buckets[bucket] = buckets.get(bucket, 0) + 1
+    top_intents = sorted(buckets.items(), key=lambda kv: -kv[1])[:4]
+    return {"replies": replies_today, "leads": leads_today, "avg_latency_ms": round(avg_latency),
+            "top_intents": [{"intent": name, "count": count} for name, count in top_intents]}
+
+
+def build_digest_text(tenant_name: str, stats: dict) -> str:
+    intents = "、".join(f"{item['intent']}×{item['count']}" for item in stats["top_intents"]) or "暂无"
+    return (
+        f"📊 {tenant_name} 私信经营日报\n"
+        f"今日 AI 生成回复：{stats['replies']} 条\n"
+        f"今日新增线索：{stats['leads']} 条\n"
+        f"平均回复耗时：{stats['avg_latency_ms']}ms\n"
+        f"客户在问：{intents}"
+    )
+
+
+def push_daily_digest_if_due() -> None:
+    """每天到达 REPORT_HOUR 后向所有配置了 webhook 的租户推送一次日报。"""
+    now = datetime.now(timezone.utc)
+    today_key = now.strftime("%Y-%m-%d")
+    if now.hour < REPORT_HOUR:
+        return
+    try:
+        with sqlite3.connect(FEEDBACK_DB) as conn:
+            tenants = conn.execute("SELECT id, workspace_name, webhook_url FROM tenants WHERE webhook_url != ''").fetchall()
+        for tenant_id, name, webhook in tenants:
+            stats = today_stats({"id": tenant_id})
+            if stats["replies"] == 0 and stats["leads"] == 0:
+                continue
+            alert_once(tenant_id, "daily_digest", today_key, build_digest_text(name or "工作区", stats), webhook)
+    except Exception as error:
+        print(f"[Digest Error] {error}")
+
+
+def alert_worker() -> None:
+    """后台线程：新线索即时警报 + 每日日报。"""
+    init_feedback_db()
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            window_start = (now - timedelta(minutes=2)).isoformat()
+            with sqlite3.connect(FEEDBACK_DB) as conn:
+                fresh = conn.execute(
+                    "SELECT id, tenant_id, user_name, lead_type, lead_value, context_summary FROM tenant_leads WHERE created_at>=?",
+                    (window_start,),
+                ).fetchall()
+            for lead_id, tenant_id, user_name, lead_type, lead_value, summary in fresh:
+                with sqlite3.connect(FEEDBACK_DB) as conn:
+                    webhook = conn.execute("SELECT webhook_url FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+                webhook_url = (webhook[0] if webhook else "") or ALERT_WEBHOOK
+                if webhook_url:
+                    alert_once(
+                        tenant_id, "new_lead", lead_id,
+                        f"🎯 新线索！客户「{user_name or '匿名'}」留下{lead_type}：{lead_value}\n场景：{summary[:80]}\n快去私信台跟进，别让客户凉了。",
+                        webhook_url,
+                    )
+            push_daily_digest_if_due()
+        except Exception as error:
+            print(f"[Alert Worker Error] {error}")
+        time.sleep(60)
 def register_tenant(workspace_name: str) -> dict:
     init_feedback_db()
     tenant_id = f"t_{secrets.token_hex(8)}"
@@ -1225,6 +1402,15 @@ class HttpHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "tenant_required"})
                 return
             self._send_json(200, {"ok": True, "items": list_tenant_leads(tenant["id"])})
+        elif path == "/report/today":
+            tenant = self._tenant()
+            if PRODUCT_MODE and not tenant:
+                return
+            init_feedback_db()
+            stats = today_stats(tenant)
+            webhook = get_tenant_webhook(tenant)
+            stats["webhook_configured"] = bool(webhook)
+            self._send_json(200, {"ok": True, **stats})
         elif path == "/leads/export.csv":
             tenant = self._tenant()
             if PRODUCT_MODE and not tenant:
@@ -1282,7 +1468,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             self._send_json(201, {"ok": True, **result})
             return
 
-        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/leads/delete", "/leads/clear"}:
+        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/tenant/webhook", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/leads/delete", "/leads/clear"}:
             tenant = self._tenant()
             if PRODUCT_MODE and not tenant:
                 return
@@ -1336,6 +1522,18 @@ class HttpHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"ok": False, "error": "tenant_required"})
                     return
                 self._send_json(200, {"ok": True, "config": update_tenant(tenant["id"], payload)})
+                return
+
+            if path == "/tenant/webhook":
+                if not tenant:
+                    self._send_json(400, {"ok": False, "error": "tenant_required"})
+                    return
+                webhook_url = str(payload.get("url") or "").strip()
+                if webhook_url and not (webhook_url.startswith("https://open.feishu.cn/") or webhook_url.startswith("https://qyapi.weixin.qq.com/")):
+                    self._send_json(400, {"ok": False, "error": "webhook_url_not_allowed"})
+                    return
+                set_tenant_webhook(tenant["id"], webhook_url)
+                self._send_json(200, {"ok": True, "webhook_url": webhook_url})
                 return
 
             if path in {"/knowledge/upload", "/knowledge/feishu", "/knowledge/status"}:
@@ -1419,6 +1617,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             shared_cards = payload.get("shared_cards") or []
             action = payload.get("action") or "reply"
             knowledge_scope = scope
+            request_started = time.monotonic()
 
             # /reply 会真实消耗模型额度：拒绝可信来源之外的浏览器跨域调用，防止被任意网页白嫖。
             origin = str(self.headers.get("Origin") or "").strip()
@@ -1452,6 +1651,11 @@ class HttpHandler(BaseHTTPRequestHandler):
                 self._send_json(503, {"ok": False, "error": "llm_unavailable"})
                 return
 
+            log_reply(
+                tenant["id"] if tenant else "", str(payload.get("session_id") or ""),
+                user_name, latest_msg, llm_reply, action, int((time.monotonic() - request_started) * 1000),
+            )
+
             self._send_json(200, {
                 "ok": True,
                 "reply": llm_reply,
@@ -1465,6 +1669,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 def main():
+    threading.Thread(target=alert_worker, daemon=True).start()
     parser = argparse.ArgumentParser(description="私域接待 Agent HTTP 服务")
     parser.add_argument("--port", type=int, default=18195)
     parser.add_argument("--host", default="127.0.0.1")

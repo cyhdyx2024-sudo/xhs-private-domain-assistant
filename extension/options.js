@@ -78,7 +78,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       $('pageHeaderTitle').textContent = pageTitles[target] || '企业控制台';
       if (target === 'knowledge') loadDocuments();
       if (target === 'faq') loadFaqs();
-      if (target === 'crm') loadLeads();
+      if (target === 'crm') { loadLeads(); loadTodayReport(); }
       if (target === 'runtime') loadFeedback();
     });
   });
@@ -566,6 +566,49 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   $('btnRefreshLeads').addEventListener('click', loadLeads);
+
+  // 今日经营战报
+  async function loadTodayReport() {
+    if (!config.workspaceToken) return;
+    try {
+      const res = await fetch(`${SERVICE_URL}/report/today`, {
+        headers: { 'Authorization': `Bearer ${config.workspaceToken}` }
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      $('statReplies').textContent = data.replies;
+      $('statLeads').textContent = data.leads;
+      $('statLatency').textContent = data.avg_latency_ms >= 1000 ? `${(data.avg_latency_ms / 1000).toFixed(1)}s` : `${data.avg_latency_ms}ms`;
+      $('statIntents').textContent = (data.top_intents || []).map(i => `${i.intent}×${i.count}`).join('、') || '今天还没有咨询';
+      if (!$('alertWebhook').value) $('webhookStatus').textContent = data.webhook_configured ? '✅ 已配置警报推送' : '';
+    } catch (error) {
+      $('statIntents').textContent = `战报加载失败：${error.message}`;
+    }
+  }
+  $('btnRefreshReport').addEventListener('click', loadTodayReport);
+
+  // 线索流失警报 Webhook
+  $('btnSaveWebhook').addEventListener('click', async () => {
+    const status = $('webhookStatus');
+    if (!config.workspaceToken) { status.textContent = '❌ 请先保存一次全局配置'; status.style.color = '#ef4444'; return; }
+    status.style.color = '#64748b';
+    status.textContent = '正在保存...';
+    try {
+      const res = await fetch(`${SERVICE_URL}/tenant/webhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken}` },
+        body: JSON.stringify({ url: $('alertWebhook').value.trim() })
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      status.style.color = '#16a34a';
+      status.textContent = '✅ 已保存，新线索会立刻推送到群机器人';
+    } catch (error) {
+      status.style.color = '#ef4444';
+      status.textContent = `❌ ${error.message}`;
+    }
+  });
+
   $('btnExportLeads').addEventListener('click', async () => {
     const button = $('btnExportLeads');
     button.disabled = true;
