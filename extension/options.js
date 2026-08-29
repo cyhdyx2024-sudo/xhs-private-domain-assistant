@@ -92,11 +92,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         break;
       }
     }
-    if (!config.modelBaseUrl) matchedProvider = 'deepseek';
+    // 未配置过模型时不伪造默认值：留空 = 使用服务端网关（自托管默认形态）
+    if (!config.modelBaseUrl && !config.modelApiKey) matchedProvider = 'custom';
     $('modelProvider').value = matchedProvider;
 
-    $('modelBaseUrl').value = config.modelBaseUrl || PROVIDERS.deepseek.url;
-    $('modelName').value = config.modelName || PROVIDERS.deepseek.model;
+    $('modelBaseUrl').value = config.modelBaseUrl || '';
+    $('modelName').value = config.modelName || '';
     $('modelApiKey').value = config.modelApiKey || '';
     $('embeddingBaseUrl').value = config.embeddingBaseUrl || '';
     $('embeddingModel').value = config.embeddingModel || '';
@@ -141,9 +142,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       const modelUrl = $('modelBaseUrl').value.trim();
       const modelName = $('modelName').value.trim();
       const modelKey = $('modelApiKey').value.trim();
-      if (!modelKey) throw new Error('请先填写大模型 API Key，并通过连通性测试');
-      if (!modelUrl || !/^https:\/\//i.test(modelUrl)) throw new Error('模型 API 地址必须是有效的 HTTPS 地址');
-      if (!modelName) throw new Error('请填写模型名称');
+      const bridgeIsLocal = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i.test(SERVICE_URL);
+      const usingServerGateway = !modelKey && !modelUrl && !modelName;
+      if (usingServerGateway && !bridgeIsLocal) throw new Error('远程服务必须配置 API Key；自托管（127.0.0.1/localhost）可留空以使用服务端默认网关');
+      if (!usingServerGateway) {
+        if (!modelKey) throw new Error('请先填写大模型 API Key，或将三个模型字段全部留空以使用服务端网关');
+        if (!modelUrl || !/^https:\/\//i.test(modelUrl)) throw new Error('模型 API 地址必须是有效的 HTTPS 地址');
+        if (!modelName) throw new Error('请填写模型名称');
+      }
 
       let token = config.workspaceToken || '';
       const wsName = $('workspaceName').value.trim() || 'My_Workspace';
@@ -228,9 +234,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const key = $('modelApiKey').value.trim();
     const model = $('modelName').value.trim();
 
-    if (!key) {
+    const bridgeIsLocal = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i.test(SERVICE_URL);
+    if (!key && !bridgeIsLocal) {
       resBox.style.color = '#ef4444';
-      resBox.textContent = '❌ 请先填写 API Key';
+      resBox.textContent = '❌ 请先填写 API Key（远程服务必须自带 Key；自托管可留空改用服务端网关）';
       return;
     }
 
