@@ -1,6 +1,6 @@
 # 小红书私信智能顾问
 
-V1.0 是一个面向小红书专业号客服工作台的 Chrome 私信副驾，由浏览器扩展和可自托管的 LLM Bridge 组成。
+V1.0 是一个面向小红书专业号客服工作台的 Chrome 私信副驾，由浏览器扩展和可自托管的 LLM Bridge 组成。当前补丁版本为 V1.0.1。
 
 ## 功能
 
@@ -18,7 +18,7 @@ V1.0 是一个面向小红书专业号客服工作台的 Chrome 私信副驾，�
 
 ## 安装扩展
 
-1. 下载 GitHub Release 中的 `xhs-private-domain-assistant-v1.0.0.zip` 并解压。
+1. 下载 GitHub Release 中的 `xhs-private-domain-assistant-v1.0.1.zip` 并解压。
 2. Chrome 打开 `chrome://extensions/`，启用开发者模式。
 3. 点击“加载已解压的扩展程序”，选择解压后的 `extension` 目录。
 4. 打开扩展完成首次设置。建议先使用半自动模式检查真实会话。
@@ -37,6 +37,7 @@ python3 agent.py
 
 ```bash
 cd extension && node test_release.mjs
+node test_safety.mjs
 cd ../server && python3 -m unittest discover -v
 ```
 
@@ -45,6 +46,7 @@ cd ../server && python3 -m unittest discover -v
 - 全自动必须由用户明确开启；安装或刷新不会自动打开。
 - 自动化依赖小红书网页 DOM，平台改版后需要重新验证。
 - 涉及外部动作状态、关键事实或模型不可用时，应交由人工处理。
+- 全自动仅处理时间可确认且不超过两小时的消息，并要求在工作台显式点击“开始无人值守”。
 - 使用前请自行确认符合平台规则、隐私要求和适用法律。
 
 ## 开源许可证

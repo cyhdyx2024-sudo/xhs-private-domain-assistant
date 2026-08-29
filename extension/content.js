@@ -6,10 +6,12 @@
   'use strict';
   if (window.top !== window) return;
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
+  const Safety = globalThis.XhsSafety;
   const DEFAULTS = {
-    enabled: false, onboardingComplete: false, runMode: 'copilot', timeScope: 'all_day', fullAutoArmedAt: 0,
-    cooldownMinutes: 30, maxRepliesPerHour: 12, repliedCount: 0, leadsCount: 0,
+    enabled: false, onboardingComplete: false, runMode: 'copilot', timeScope: 'all_day', fullAutoArmedAt: 0, operatorAway: false,
+    cooldownMinutes: 30, maxRepliesPerHour: 12, autoReplyMaxAgeMinutes: 120,
+    repliedCount: 0, leadsCount: 0, statsDate: '', contactBlacklist: [],
     processedMap: {}, hourlySendTimestamps: [], uncertainSendMap: {},
     bridgeUrl: 'http://127.0.0.1:18195', workspaceToken: '', accountId: '',
     knowledgeScope: 'default', modelBaseUrl: 'https://api.openai.com/v1/chat/completions',
@@ -41,11 +43,23 @@
 
   const draftCache = new Map();
   const inFlightSignatures = new Set();
-  const autoSkipUntil = new Map();
+  const messageRetryUntil = new Map();
+  const contactRetryUntil = new Map();
+  const signatureFailureCounts = new Map();
+  const scanSeenIds = new Set();
+  let globalCircuitUntil = 0;
+  let scanPassStartedAt = Date.now();
   const storageGet = keys => new Promise(resolve => chrome.storage.local.get(keys, resolve));
   const storageSet = values => new Promise(resolve => chrome.storage.local.set(values, resolve));
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
+
+  async function ensureDailyStats() {
+    const next = Safety.normalizeDailyStats(state);
+    if (next.statsDate === state.statsDate) return;
+    Object.assign(state, next);
+    await storageSet(next);
+  }
 
   function isVisible(element) {
     if (!element) return false;
@@ -145,10 +159,7 @@
   }
 
   function parseTimestamp(text) {
-    const match = text.match(/(20\d{2})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
-    if (!match) return 0;
-    const [, y, m, d, hh, mm, ss] = match;
-    return new Date(`${y}-${m}-${d}T${hh}:${mm}:${ss}+08:00`).getTime();
+    return Safety.parseMessageTimestamp(text);
   }
 
   function emptyHistory(session) {
@@ -243,8 +254,10 @@
     const input = document.querySelector(selector);
     if (input && !cleanText(input.value)) {
       safeSetNativeValue(input, lead.value);
-      state.leadsCount += 1;
-      storageSet({ leadsCount: state.leadsCount });
+      ensureDailyStats().then(() => {
+        state.leadsCount += 1;
+        storageSet({ leadsCount: state.leadsCount, statsDate: state.statsDate });
+      });
       addLog('lead', `已识别${lead.type}并预填右侧客资：${lead.value}`);
     }
   }
@@ -256,9 +269,23 @@
     inFlightSignatures.clear();
   }
 
+  async function suspendForAuthFailure() {
+    state.enabled = false;
+    state.onboardingComplete = false;
+    state.fullAutoArmedAt = 0;
+    state.operatorAway = false;
+    state.workspaceToken = '';
+    globalCircuitUntil = Infinity;
+    await storageSet({ enabled: false, onboardingComplete: false, fullAutoArmedAt: 0, operatorAway: false, workspaceToken: '' });
+    syncDockFromState();
+    addLog('error', '工作区凭据已失效，系统已停机。请打开完整管理控制台重新保存配置');
+  }
+
   async function fetchLLMReply(history, session, action) {
     if (!history.latestUserMsg && action !== 'manual_followup') return '';
     if (inFlightSignatures.has(history.signature)) return '';
+    const retryAt = Math.max(Number(messageRetryUntil.get(history.signature) || 0), Number(globalCircuitUntil || 0));
+    if (retryAt > Date.now()) return '';
     const serial = ++requestSerial;
     requestController?.abort('superseded');
     const controller = new AbortController();
@@ -276,7 +303,13 @@
           shared_cards: history.sharedCards.slice(-3), knowledge_scope: getKnowledgeScope()
         })
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        let detail = {};
+        try { detail = await response.json(); } catch (_) { /* non-JSON upstream error */ }
+        const requestError = new Error(detail.error || `HTTP ${response.status}`);
+        requestError.status = response.status;
+        throw requestError;
+      }
       const data = await response.json();
       const active = getActiveSession();
       const activeHistory = active ? parseConversationHistory(active) : null;
@@ -308,6 +341,8 @@
         } catch (_rewriteErr) { /* 重写失败时保留原始兜底 */ }
       }
       if (reply) {
+        signatureFailureCounts.delete(history.signature);
+        messageRetryUntil.delete(history.signature);
         recordMonitor({ lastLlmAt: Date.now(), lastLlmLatencyMs: Date.now() - requestStartedAt,
           llmSuccessCount: Number(state.monitor?.llmSuccessCount || 0) + 1, lastError: '' });
         const sourceCount = Array.isArray(data.knowledge_sources) ? data.knowledge_sources.length : 0;
@@ -316,10 +351,19 @@
       return reply;
     } catch (error) {
       if (!controller.signal.aborted && serial === requestSerial && error?.name !== 'AbortError') {
+        const status = Number(error?.status || 0);
+        const failures = Number(signatureFailureCounts.get(history.signature) || 0) + 1;
+        signatureFailureCounts.set(history.signature, failures);
+        const delay = Safety.retryDelayMs(status, failures);
+        if (status === 401 || status === 403) await suspendForAuthFailure();
+        else {
+          messageRetryUntil.set(history.signature, Date.now() + delay);
+          if (status === 429 || status >= 500 || status === 0) globalCircuitUntil = Date.now() + Math.min(delay, 5 * 60 * 1000);
+        }
         console.warn('[XHS Reply] LLM request failed', error);
         recordMonitor({ lastLlmAt: Date.now(), lastLlmLatencyMs: Date.now() - requestStartedAt,
           llmFailureCount: Number(state.monitor?.llmFailureCount || 0) + 1, lastError: error.message || '请求失败' });
-        addLog('error', `大模型暂时不可用：${error.message || '请求失败'}`);
+        if (status !== 401 && status !== 403) addLog('error', `大模型暂时不可用：${error.message || '请求失败'}；同一消息将在 ${Math.ceil(delay / 1000)} 秒后重试`);
       }
       return '';
     } finally {
@@ -464,6 +508,7 @@
       updateSessionLabel(session);
     }
     const history = parseConversationHistory(session);
+    if (!force && Number(messageRetryUntil.get(history.signature) || 0) > Date.now()) return;
     const cached = draftCache.get(session.id);
     if (!force && !history.needsReply) {
       updateRuntimeStatus('copilot', '等待客户新消息');
@@ -487,7 +532,7 @@
   }
 
   function isFullAutoArmed() {
-    return state.enabled && state.runMode === 'full_auto' && Number(state.fullAutoArmedAt) > 0;
+    return state.enabled && state.runMode === 'full_auto' && state.operatorAway === true && Number(state.fullAutoArmedAt) > 0;
   }
 
   function pruneProcessedMap() {
@@ -522,14 +567,13 @@
       if (!key || seen.has(key)) return null;
       seen.add(key);
       const cardText = cleanText(card.innerText);
+      const name = cleanText(card.querySelector('.nick-name')?.innerText);
+      if (Safety.isExcludedContact(name, cardText, state.contactBlacklist)) return null;
       const hasTimeout = cardText.includes('[超时未回复]');
       const hasUnreadDot = Boolean(card.querySelector('[class*="unread"], .red-dot, .d-badge-dot'));
       if (!hasTimeout && !hasUnreadDot) return null;
-      const preview = cleanText(card.querySelector('.item-main-center')?.innerText || cardText).slice(0, 180);
-      const queueKey = `${key}::${preview}`;
-      if (Number(autoSkipUntil.get(queueKey) || 0) > Date.now()) return null;
-      if (Number(state.uncertainSendMap?.[queueKey] || 0) > Date.now()) return null;
-      return { card, id: card.getAttribute('data-key') || '', queueKey };
+      if (Number(contactRetryUntil.get(key) || 0) > Date.now()) return null;
+      return { card, id: card.getAttribute('data-key') || '', name };
     }).filter(Boolean);
   }
 
@@ -541,12 +585,24 @@
 
   function advanceVirtualContactWindow() {
     // 只扫描当前可见且真实可滚动的会话列表，避免命中页面保留的 0 高度旧列表。
-    if (Date.now() - lastVirtualSweepAt < 800 || Date.now() - lastUserActivityAt < 3000) return false;
+    if (Date.now() - lastVirtualSweepAt < 800 || Date.now() - lastUserActivityAt < 60_000) return false;
     const scroller = getVisibleContactScroller();
     if (!scroller) return false;
+    Array.from(scroller.querySelectorAll('.sx-contact-item')).forEach(card => {
+      if (!isVisible(card) || isVirtualGhost(card)) return;
+      const id = card.getAttribute('data-key') || cleanText(card.querySelector('.nick-name')?.innerText);
+      if (id) scanSeenIds.add(id);
+    });
     lastVirtualSweepAt = Date.now();
     const next = scroller.scrollTop + Math.max(240, Math.floor(scroller.clientHeight * 0.9));
-    scroller.scrollTop = next >= scroller.scrollHeight - scroller.clientHeight - 8 ? 0 : next;
+    const atBottom = next >= scroller.scrollHeight - scroller.clientHeight - 8;
+    scroller.scrollTop = atBottom ? 0 : next;
+    if (atBottom) {
+      recordMonitor({ scanSeenCount: scanSeenIds.size, lastFullScanAt: Date.now(), lastScanDurationMs: Date.now() - scanPassStartedAt });
+      addLog('info', `完整巡检结束：覆盖 ${scanSeenIds.size} 个会话`);
+      scanSeenIds.clear();
+      scanPassStartedAt = Date.now();
+    }
     scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
     return true;
   }
@@ -605,7 +661,7 @@
 
   async function runFullAutoCycle() {
     if (destroyed || autoProcessing || !isFullAutoArmed() || !isWithinTimeScope()) return;
-    if (document.hasFocus() && Date.now() - lastUserActivityAt < 3500) {
+    if (document.hasFocus() && Date.now() - lastUserActivityAt < 60_000) {
       updateRuntimeStatus('full_auto', '人工操作中，暂缓切换');
       return;
     }
@@ -628,23 +684,31 @@
       if (getActiveSession()?.id !== targetId) pending.card.click();
       const session = await waitForSession(targetId);
       if (!session) {
-        autoSkipUntil.set(pending.queueKey, Date.now() + 30_000);
+        contactRetryUntil.set(targetId, Date.now() + 60_000);
         return;
       }
       const history = parseConversationHistory(session);
       if (!history.needsReply || !history.latestUserMsg) {
         // 例如仅有“温馨提示”的空会话，短暂跳过并继续扫描下一位。
-        autoSkipUntil.set(pending.queueKey, Date.now() + 60_000);
+        messageRetryUntil.set(history.signature, Date.now() + 60_000);
         return;
       }
+      const retryAt = Math.max(Number(messageRetryUntil.get(history.signature) || 0), Number(state.uncertainSendMap?.[history.signature] || 0));
+      if (retryAt > Date.now()) return;
       if (hasProcessedSignature(history.signature)) {
-        autoSkipUntil.set(pending.queueKey, Date.now() + Number(state.cooldownMinutes || 30) * 60_000);
+        messageRetryUntil.set(history.signature, Date.now() + Number(state.cooldownMinutes || 30) * 60_000);
+        return;
+      }
+      const age = Safety.messageAgeDecision(history.latestUserTurn?.timestamp, Date.now(), Number(state.autoReplyMaxAgeMinutes || 120) * 60_000);
+      if (age.action !== 'auto') {
+        messageRetryUntil.set(history.signature, Date.now() + (age.action === 'skip' ? 24 * 60 * 60_000 : 60 * 60_000));
+        addLog('info', `已将 [${session.name}] 交给人工：${age.reason}`);
         return;
       }
       if (isExternalActionStatusCheck(history.latestUserMsg)) {
         // “加了没/发了吗”依赖外部动作状态，页面会话本身无法证明结果。
         // 全自动宁可交给人工，也不能假装已完成或把话题岔到产品介绍。
-        autoSkipUntil.set(pending.queueKey, Date.now() + 30 * 60_000);
+        messageRetryUntil.set(history.signature, Date.now() + 30 * 60_000);
         addLog('info', `已将 [${session.name}] 的外部状态确认交给人工处理`);
         return;
       }
@@ -652,13 +716,13 @@
       if (lead) syncLeadToRightPanel(lead);
       const reply = await fetchLLMReply(history, session, 'auto_reply');
       if (!reply) {
-        autoSkipUntil.set(pending.queueKey, Date.now() + 30_000);
+        if (!messageRetryUntil.has(history.signature)) messageRetryUntil.set(history.signature, Date.now() + 60_000);
         return;
       }
       const sendResult = await humanTypeAndSend(session, history, reply, operationStartedAt);
       if (!sendResult.confirmed) {
         if (sendResult.clicked) {
-          state.uncertainSendMap[pending.queueKey] = Date.now() + 24 * 60 * 60 * 1000;
+          state.uncertainSendMap[history.signature] = Date.now() + 24 * 60 * 60 * 1000;
           await storageSet({ uncertainSendMap: state.uncertainSendMap });
           recordMonitor({ readbackFailureCount: Number(state.monitor?.readbackFailureCount || 0) + 1,
             lastError: `${session.name} 发送结果未回读` });
@@ -671,16 +735,18 @@
         return;
       }
       state.processedMap[history.signature] = Date.now();
-      autoSkipUntil.set(pending.queueKey, Date.now() + Number(state.cooldownMinutes || 30) * 60_000);
+      messageRetryUntil.set(history.signature, Date.now() + Number(state.cooldownMinutes || 30) * 60_000);
       state.hourlySendTimestamps.push(Date.now());
+      await ensureDailyStats();
       state.repliedCount += 1;
       recordMonitor({ sendSuccessCount: Number(state.monitor?.sendSuccessCount || 0) + 1, lastError: '' });
       pruneProcessedMap();
-      await storageSet({ processedMap: state.processedMap, hourlySendTimestamps: state.hourlySendTimestamps, repliedCount: state.repliedCount });
+      await storageSet({ processedMap: state.processedMap, hourlySendTimestamps: state.hourlySendTimestamps, repliedCount: state.repliedCount, statsDate: state.statsDate });
       addLog('success', `已自动回复 [${session.name}]；会话签名已锁定防重复`);
     } finally {
       await restoreSession(originalSessionId, operationStartedAt);
       autoProcessing = false;
+      advanceVirtualContactWindow();
     }
   }
 
@@ -702,7 +768,8 @@
     const monitor = state.monitor || {};
     const last = monitor.lastLlmAt ? new Date(monitor.lastLlmAt).toLocaleTimeString('zh-CN', { hour12: false }) : '尚未调用';
     const latency = monitor.lastLlmLatencyMs ? `${monitor.lastLlmLatencyMs}ms` : '-';
-    box.textContent = `LLM：${last} · 最近 ${latency} · 成功 ${monitor.llmSuccessCount || 0} · 失败 ${monitor.llmFailureCount || 0} · 回读失败 ${monitor.readbackFailureCount || 0}`;
+    const scan = monitor.lastFullScanAt ? ` · 巡检 ${monitor.scanSeenCount || 0} 个 @ ${new Date(monitor.lastFullScanAt).toLocaleTimeString('zh-CN', { hour12: false })}` : ' · 巡检尚未完成';
+    box.textContent = `LLM：${last} · 最近 ${latency} · 成功 ${monitor.llmSuccessCount || 0} · 失败 ${monitor.llmFailureCount || 0} · 回读失败 ${monitor.readbackFailureCount || 0}${scan}`;
     box.title = monitor.lastError ? `最近异常：${monitor.lastError}` : '当前没有记录异常';
   }
 
@@ -718,7 +785,7 @@
   async function uploadKnowledgeFiles(files) {
     const status = document.getElementById('xhsKnowledgeIngestStatus');
     for (const file of Array.from(files || [])) {
-      if (file.size > 12 * 1024 * 1024) { if (status) status.textContent = `${file.name} 超过 12MB`; continue; }
+      if (file.size > 10 * 1024 * 1024) { if (status) status.textContent = `${file.name} 超过 10MB`; continue; }
       try {
         if (status) status.textContent = `正在解析并索引 ${file.name}…`;
         const response = await fetch(`${getBridgeUrl()}/knowledge/upload`, {
@@ -861,9 +928,14 @@
 
   async function saveConfig(patch, { arm = false } = {}) {
     state = { ...state, ...patch };
-    if (state.runMode !== 'full_auto' || !state.enabled) state.fullAutoArmedAt = 0;
-    else if (arm) state.fullAutoArmedAt = Date.now();
-    await storageSet({ enabled: state.enabled, runMode: state.runMode, timeScope: state.timeScope, fullAutoArmedAt: state.fullAutoArmedAt });
+    if (state.runMode !== 'full_auto' || !state.enabled || !arm) {
+      state.fullAutoArmedAt = 0;
+      state.operatorAway = false;
+    } else {
+      state.fullAutoArmedAt = Date.now();
+      state.operatorAway = true;
+    }
+    await storageSet({ enabled: state.enabled, runMode: state.runMode, timeScope: state.timeScope, fullAutoArmedAt: state.fullAutoArmedAt, operatorAway: state.operatorAway });
     if (!isFullAutoArmed()) autoProcessing = false;
     abortPendingRequest('config_changed');
     syncDockFromState();
@@ -880,8 +952,13 @@
     const armed = isFullAutoArmed();
     const hint = document.getElementById('xhsAutoArmHint');
     if (hint) hint.textContent = state.runMode === 'full_auto'
-      ? (armed ? '已武装：无人操作时自动回复' : '未武装：请重新选择全自动或打开总开关')
+      ? (armed ? '已武装：无人操作时自动回复' : '未武装：请点击“开始无人值守”')
       : '副驾只预填草稿，不会自动发送';
+    const awayButton = document.getElementById('xhsBeginAwayMode');
+    if (awayButton) {
+      awayButton.hidden = state.runMode !== 'full_auto';
+      awayButton.textContent = armed ? '结束无人值守' : '开始无人值守';
+    }
     const button = document.getElementById('xhsBtnGenNow');
     if (button) button.textContent = state.runMode === 'full_auto' ? '立即扫描待回复会话' : '为当前会话生成专属草稿';
     updateRuntimeStatus(state.runMode, state.runMode === 'full_auto' ? (armed ? '监听新进线中' : '等待武装') : '等待客户新消息');
@@ -921,6 +998,7 @@
             <option value="copilot">半自动副驾（只预填）</option><option value="full_auto">全自动秒回（自动发送）</option></select></div>
           <div class="xhs-field-group"><label class="xhs-field-label">生效时段</label><select class="xhs-input-text" id="xhsDockTimeScope">
             <option value="all_day">全天运行</option><option value="night_only">仅夜间 22:00–09:00</option></select></div>
+          <button class="xhs-btn xhs-btn-primary" style="width:100%;margin-bottom:10px;" id="xhsBeginAwayMode" hidden>开始无人值守</button>
           <div class="xhs-field-group"><label class="xhs-field-label">运行监控</label><div class="xhs-monitor-summary" id="xhsMonitorSummary">等待数据</div></div>
           <div style="font-size:11px;color:#64748b;line-height:1.6;">全自动会在人工操作页面时暂停；同一条客户消息 30 分钟内不会重复发送，每小时最多 ${state.maxRepliesPerHour} 条。</div>
         </div>
@@ -944,12 +1022,17 @@
       root.querySelector('#xhsTabKnowledge').style.display = tab.dataset.tab === 'knowledge' ? '' : 'none';
       if (tab.dataset.tab === 'knowledge') loadKnowledge();
     }));
-    root.querySelector('#xhsDockMasterToggle').addEventListener('change', e => saveConfig({ enabled: e.target.checked }, { arm: e.target.checked && state.runMode === 'full_auto' }));
+    root.querySelector('#xhsDockMasterToggle').addEventListener('change', e => saveConfig({ enabled: e.target.checked }));
     root.querySelector('#xhsDockRunMode').addEventListener('change', e => {
-      saveConfig({ runMode: e.target.value }, { arm: e.target.value === 'full_auto' && state.enabled });
+      saveConfig({ runMode: e.target.value });
       addLog('info', `模式已切换为：${e.target.value === 'full_auto' ? '全自动秒回' : '半自动副驾'}`);
     });
     root.querySelector('#xhsDockTimeScope').addEventListener('change', e => saveConfig({ timeScope: e.target.value }));
+    root.querySelector('#xhsBeginAwayMode').addEventListener('click', () => {
+      const ending = isFullAutoArmed();
+      saveConfig({}, { arm: !ending });
+      addLog('info', ending ? '已结束无人值守，恢复人工占用' : '已开始无人值守；任何人工操作都会立即退出');
+    });
     root.querySelector('#xhsBtnRefreshKnowledge').addEventListener('click', loadKnowledge);
     root.querySelector('#xhsKnowledgeFiles').addEventListener('change', e => uploadKnowledgeFiles(e.target.files));
     root.querySelector('#xhsBtnImportFeishu').addEventListener('click', importFeishuKnowledge);
@@ -990,6 +1073,13 @@
   function onUserActivity(event) {
     if (!event.isTrusted) return;
     lastUserActivityAt = Date.now();
+    if (state.operatorAway) {
+      state.operatorAway = false;
+      state.fullAutoArmedAt = 0;
+      storageSet({ operatorAway: false, fullAutoArmedAt: 0 });
+      syncDockFromState();
+      addLog('info', '检测到人工操作，已退出无人值守');
+    }
     if (event.type === 'keydown' && event.key === 'Enter' && !event.shiftKey && event.target === getReplyTextarea()) {
       captureFeedbackCandidate();
     }
@@ -1002,17 +1092,21 @@
       state.enabled = false;
       state.runMode = 'copilot';
       state.fullAutoArmedAt = 0;
-      await storageSet({ enabled: false, runMode: 'copilot', fullAutoArmedAt: 0 });
+      state.operatorAway = false;
+      await storageSet({ enabled: false, runMode: 'copilot', fullAutoArmedAt: 0, operatorAway: false });
     }
     state.processedMap ||= {};
     state.hourlySendTimestamps ||= [];
     state.uncertainSendMap ||= {};
     state.monitor = { ...DEFAULTS.monitor, ...(state.monitor || {}) };
+    await ensureDailyStats();
     pruneProcessedMap();
     renderFloatingDock();
     syncDockFromState();
+    updateSessionLabel(getActiveSession());
     document.addEventListener('click', onDocumentClick, true);
     document.addEventListener('pointerdown', onUserActivity, true);
+    document.addEventListener('wheel', onUserActivity, true);
     document.addEventListener('keydown', onUserActivity, true);
     observer = new MutationObserver(mutations => {
       if (mutations.some(m => !m.target.closest?.('#xhs-reply-dock-root'))) scheduleSense(160);
@@ -1027,7 +1121,8 @@
   chrome.runtime.onMessage.addListener(message => {
     if (message?.type !== 'CONFIG_UPDATED') return;
     state = { ...state, ...(message.config || {}) };
-    if (!state.enabled || state.runMode !== 'full_auto') state.fullAutoArmedAt = 0;
+    if (message.config?.workspaceToken) globalCircuitUntil = 0;
+    if (!state.enabled || state.runMode !== 'full_auto') { state.fullAutoArmedAt = 0; state.operatorAway = false; }
     syncDockFromState();
     abortPendingRequest('popup_config_changed');
     if (state.enabled && state.runMode === 'copilot') scheduleSense(80);
@@ -1035,9 +1130,10 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    ['enabled', 'onboardingComplete', 'runMode', 'timeScope', 'fullAutoArmedAt', 'repliedCount', 'leadsCount', 'bridgeUrl', 'workspaceToken', 'accountId', 'knowledgeScope', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl', 'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'monitor', 'uncertainSendMap'].forEach(key => {
+    ['enabled', 'onboardingComplete', 'runMode', 'timeScope', 'fullAutoArmedAt', 'operatorAway', 'repliedCount', 'leadsCount', 'statsDate', 'bridgeUrl', 'workspaceToken', 'accountId', 'knowledgeScope', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl', 'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'monitor', 'uncertainSendMap', 'autoReplyMaxAgeMinutes', 'contactBlacklist'].forEach(key => {
       if (changes[key]) state[key] = changes[key].newValue;
     });
+    if (changes.workspaceToken?.newValue) globalCircuitUntil = 0;
     syncDockFromState();
   });
 
@@ -1053,6 +1149,7 @@
       abortPendingRequest('destroyed');
       document.removeEventListener('click', onDocumentClick, true);
       document.removeEventListener('pointerdown', onUserActivity, true);
+      document.removeEventListener('wheel', onUserActivity, true);
       document.removeEventListener('keydown', onUserActivity, true);
       document.getElementById('xhs-reply-dock-root')?.remove();
     }

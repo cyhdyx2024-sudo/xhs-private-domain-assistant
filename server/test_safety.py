@@ -25,6 +25,11 @@ class ProductSafetyTest(unittest.TestCase):
         issues = agent.reply_quality_issues("申请通过了吗", [], "已经通过了，您刷新一下就能看到。")
         self.assertIn("当前会话无法核验外部动作状态，回复却声称已经完成", issues)
 
+    def test_rejects_proactive_external_action_promises(self):
+        for reply in ["我这就添加您", "我马上加您", "稍后把资料发过去", "我帮您通过申请"]:
+            issues = agent.reply_quality_issues("麻烦添加下这个", [], reply)
+            self.assertIn("回复承诺执行当前会话无法核验的外部动作", issues, reply)
+
     def test_product_mode_requires_explicit_byok_headers(self):
         with patch.object(agent, "PRODUCT_MODE", True):
             with self.assertRaisesRegex(ValueError, "model_api_key_required"):

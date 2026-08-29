@@ -119,7 +119,7 @@ PRODUCT_MODE = os.environ.get("XHS_PRODUCT_MODE", "0") == "1"
 ALLOWED_MODEL_HOSTS = {
     host.strip().lower() for host in os.environ.get(
         "XHS_ALLOWED_MODEL_HOSTS",
-        "api.openai.com,api.deepseek.com,api.siliconflow.cn,openrouter.ai",
+        "api.openai.com,api.deepseek.com,dashscope.aliyuncs.com,open.bigmodel.cn,api.moonshot.cn,api.siliconflow.cn,ark.cn-beijing.volces.com,api.minimax.chat,openrouter.ai",
     ).split(",") if host.strip()
 }
 FEEDBACK_DB = Path(os.environ.get(
@@ -1035,6 +1035,12 @@ def reply_quality_issues(latest_msg: str, turns: list, reply: str) -> list[str]:
             issues.append("客户在确认外部动作状态，回复却把话题岔到产品介绍")
         if re.search(r"(?:已经|已)(?:发送|添加|通过|处理)|加好了|发好了", current) and not re.search(r"无法确认|不能确认|暂时看不到|需要核对", current):
             issues.append("当前会话无法核验外部动作状态，回复却声称已经完成")
+    if re.search(
+        r"(?:我|这边)?(?:这就|马上|稍后|待会儿?|现在).{0,10}(?:添加|加|发送|发|通过|处理)|"
+        r"(?:我|这边)?帮您?.{0,6}(?:添加|加|发送|发|通过)(?:一下)?(?:申请|好友|资料|链接)?",
+        current,
+    ) and not re.search(r"无法|不能|暂时.{0,4}(?:操作|确认)|需要人工|转人工|您可以", current):
+        issues.append("回复承诺执行当前会话无法核验的外部动作")
     if re.search(r"多少钱|价格|怎么收费|收费吗|费用", latest_msg) and re.search(r"\d[\d,.]*\s*(?:元|块)|每月|每年|起", current):
         issues.append("业务资料没有给出实时价格，回复却自行报价")
     if re.search(r"psd|api|导出|下载|源文件|分层|商用授权|版权", latest.lower()) and re.search(r"暂不支持|不支持|已经支持|可以导出|能够导出|目前支持", current):

@@ -204,7 +204,7 @@
           <label class="dropzone" id="knowledgeDropzone">
             <div class="drop-icon">📁</div>
             <div class="drop-text">点击或拖拽文件到这里上传</div>
-            <div class="drop-sub">支持 .pdf, .docx, .pptx, .xlsx, .csv, .txt, .md（单文件 ≤ 12MB）</div>
+            <div class="drop-sub">支持 .pdf, .docx, .pptx, .xlsx, .csv, .txt, .md（单文件 ≤ 10MB）</div>
             <input type="file" id="fileUploadInput" accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md" multiple hidden>
           </label>
           <div id="uploadStatusText" style="margin-top:10px;font-size:12px;color:var(--text-muted);"></div>
@@ -383,6 +383,16 @@
             <div class="form-group">
               <label class="form-label">单小时最大回复上限</label>
               <input type="number" class="form-input" id="maxRepliesPerHour" value="12">
+            </div>
+            <div class="form-group">
+              <label class="form-label">全自动消息时限（分钟）</label>
+              <input type="number" class="form-input" id="autoReplyMaxAgeMinutes" min="10" max="120" value="120">
+              <div class="form-help">最多 120 分钟；无法确认时间或超过时限的消息转人工。</div>
+            </div>
+            <div class="form-group" style="grid-column:span 2;">
+              <label class="form-label">会话黑名单</label>
+              <textarea class="form-textarea" id="contactBlacklist" rows="3" placeholder="每行一个昵称或关键词；匹配后不进入自动巡检"></textarea>
+              <div class="form-help">“用户已注销”、平台系统通知和企业员工已默认排除，无需重复填写。</div>
             </div>
           </div>
         </div>
