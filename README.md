@@ -20,7 +20,7 @@
 - 📚 **业务知识库 & RAG 检索**：导入 PDF/Word/Markdown/FAQ/飞书文档，混合检索（向量 + 关键词）保证应答基于真实业务事实。
 - 🎯 **线索识别 (CRM 辅助)**：捕获客户主动提供的手机号/微信号并格式化预填至客资栏，减少手动誊抄。
 - 🔄 **人工反馈自学习**：人工修改过的话术一键反哺知识库，相似会话优先参考人工案例；联系方式落库前自动脱敏。
-- 🔑 **BYOK (Bring Your Own Key)**：支持 DeepSeek、OpenAI、GLM、Qwen、MiniMax、Moonshot、SiliconFlow、OpenRouter 等任意 OpenAI 兼容接口；API Key 仅存浏览器本地。
+- 🔑 **BYOK (Bring Your Own Key)**：支持 DeepSeek、OpenAI、GLM、Qwen、MiniMax、Moonshot、SiliconFlow、OpenRouter 等任意 OpenAI 兼容接口。API Key 保存在浏览器本地存储，不写入数据库；生成回复时会作为请求头发送到你自建的 Bridge，再由 Bridge 转发给模型服务商，请自行保管好 Bridge 所在服务器的安全。
 - 🌙 **可选的谨慎值守模式**：默认关闭；需在工作台显式开启，带时段限制、每小时上限、单会话冷却、两小时消息时限、操作员活动检测（键鼠活动即刻退出）与发送后回读核验。
 
 ## 🏗️ 系统架构（默认自托管）
@@ -52,7 +52,7 @@ python3 agent.py       # 默认监听 http://127.0.0.1:18195
 
 ### 2. 安装 Chrome 扩展
 
-1. 从 [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases) 下载 `xhs-private-domain-assistant-v1.0.2.zip` 并解压（或直接使用仓库 `extension/` 目录）。
+1. 从 [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases) 下载 `xhs-private-domain-assistant-v1.1.0.zip` 并解压（或直接使用仓库 `extension/` 目录）。
 2. Chrome 打开 `chrome://extensions/`，开启右上角**开发者模式**。
 3. 点击**加载已解压的扩展程序**，选择解压出的 `extension` 文件夹。
 4. 打开扩展配置面板（Studio），按向导填写：工作区名称 → 模型服务商与 API Key → 店铺资料 → 回复偏好。

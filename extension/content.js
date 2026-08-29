@@ -1,19 +1,19 @@
 /**
- * 小红书专业号私信智能顾问 V1.0
+ * 小红书专业号私信智能顾问 V1.1
  * 会话以 data-key（UID）隔离；副驾只预填；全自动发送前会再次核验会话与消息签名。
  */
 (function () {
   'use strict';
   if (window.top !== window) return;
 
-  const VERSION = '1.0.3';
+  const VERSION = '1.1.0';
   const Safety = globalThis.XhsSafety;
   const DEFAULTS = {
     enabled: false, onboardingComplete: false, runMode: 'copilot', timeScope: 'all_day', fullAutoArmedAt: 0, operatorAway: false,
     cooldownMinutes: 30, maxRepliesPerHour: 12, autoReplyMaxAgeMinutes: 120,
     repliedCount: 0, leadsCount: 0, statsDate: '', contactBlacklist: [],
     processedMap: {}, hourlySendTimestamps: [], uncertainSendMap: {},
-    bridgeUrl: 'http://127.0.0.1:18195', workspaceToken: '', accountId: '',
+    bridgeUrl: 'http://127.0.0.1:18195', workspaceToken: '', accountId: '', operatorNickname: '',
     knowledgeScope: 'default', modelBaseUrl: '',
     modelName: '', modelApiKey: '', embeddingBaseUrl: '', embeddingModel: '', embeddingApiKey: '',
     feishuAppId: '', feishuAppSecret: '',
@@ -105,7 +105,7 @@
 
   function getRightPanelCustomerName() {
     const candidates = Array.from(document.querySelectorAll('.user-nickname'))
-      .filter(el => isVisible(el) && cleanText(el.innerText) && cleanText(el.innerText) !== '新作AI')
+      .filter(el => isVisible(el) && cleanText(el.innerText) && cleanText(el.innerText) !== state.operatorNickname)
       .filter(el => el.getBoundingClientRect().left > window.innerWidth * 0.68);
     return cleanText(candidates[0]?.innerText);
   }
@@ -125,7 +125,7 @@
     // 优先从页面顶部提取店铺号，保证即使 state.accountId 配错也能正确隔离
     const pageAccount = extractAccountFromHeader();
     const account = cleanText(pageAccount || state.accountId);
-    const businessLine = state.knowledgeScope || 'new-ai';
+    const businessLine = state.knowledgeScope || 'default';
     return `xhs:${location.hostname}:${account || 'unconfigured'}:${businessLine}`;
   }
 
@@ -974,7 +974,7 @@
         <span style="font-size:11px;color:#cbd5e1;" id="xhsPillModeText">加载中</span>
       </div>
       <div class="xhs-dock-panel" id="xhsExpandedPanel">
-        <div class="xhs-dock-header"><div class="xhs-dock-title">私信智能控制台 <span class="badge">V1.0</span></div>
+        <div class="xhs-dock-header"><div class="xhs-dock-title">私信智能控制台 <span class="badge">V1.1</span></div>
           <button class="xhs-dock-btn-icon" id="xhsClosePanelBtn" aria-label="关闭">✕</button></div>
         <div class="xhs-dock-tabs"><div class="xhs-dock-tab active" data-tab="quick">快捷操作</div><div class="xhs-dock-tab" data-tab="settings">开关与设置</div><div class="xhs-dock-tab" data-tab="knowledge">案例库</div></div>
         <div class="xhs-dock-body" id="xhsTabQuick">

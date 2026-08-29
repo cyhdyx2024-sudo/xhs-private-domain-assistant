@@ -52,7 +52,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     'maxRepliesPerHour', 'repliedCount', 'leadsCount', 'bridgeUrl', 'workspaceToken',
     'workspaceName', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl',
     'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'accountId',
-    'knowledgeScope', 'brandName', 'businessProfile', 'replyPreferences', 'toneProfile',
+    'knowledgeScope', 'brandName', 'operatorNickname', 'businessProfile', 'replyPreferences', 'toneProfile',
     'autoReplyMaxAgeMinutes', 'contactBlacklist', 'configVersion'
   ];
 
@@ -107,6 +107,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('accountId').value = config.accountId || '';
     $('businessLine').value = config.knowledgeScope || 'default';
     $('brandName').value = config.brandName || '';
+    $('operatorNickname').value = config.operatorNickname || '';
     $('toneProfile').value = config.toneProfile || 'warm_consultant';
     $('businessProfile').value = config.businessProfile || '';
     $('replyPreferences').value = config.replyPreferences || '';
@@ -198,6 +199,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         accountId: businessPayload.account_id,
         knowledgeScope: businessPayload.business_line,
         brandName: businessPayload.brand_name,
+        operatorNickname: $('operatorNickname').value.trim(),
         toneProfile: $('toneProfile').value,
         businessProfile: businessPayload.business_profile,
         replyPreferences: businessPayload.reply_preferences

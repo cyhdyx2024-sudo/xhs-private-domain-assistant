@@ -20,7 +20,7 @@ Traditional automated reply tools are often rigid and robotic, while purely auto
 - 📚 **Local Knowledge Studio (RAG)**: Upload enterprise materials (PDF, Word, Markdown, FAQ) to ground responses in verified business facts.
 - 🎯 **Lead Formatting (CRM)**: Intelligently detects voluntary customer contact info (Phone, WeChat IDs) and formats them into the workbench lead panel.
 - 🔄 **Continuous Learning via Feedback**: High-performing replies edited by operators can be instantly stored back into the knowledge base to adapt to your brand voice.
-- 🔑 **BYOK (Bring Your Own Key)**: Direct integration with OpenAI, DeepSeek, Claude, GLM, Qwen, MiniMax, Moonshot, SiliconFlow, and OpenRouter. API Keys are stored locally in the Chrome extension storage.
+- 🔑 **BYOK (Bring Your Own Key)**: Direct integration with OpenAI, DeepSeek, Claude, GLM, Qwen, MiniMax, Moonshot, SiliconFlow, and OpenRouter. API Keys are stored in your browser's local storage (never written to a database). Note: when generating a reply, the key is sent as a request header to your self-hosted Bridge, which then forwards the request to the model provider — secure your Bridge host accordingly.
 - 🌙 **Safe Operator Away Mode**: Configurable cooldown timers, rate limits, 2-hour message age thresholds, and automatic disarm upon detecting operator mouse/keyboard activity.
 
 ---
@@ -58,7 +58,7 @@ For team deployments, host the bridge on your own server behind an HTTPS reverse
 
 ### 2. Install Chrome Extension
 
-1. Download the latest `xhs-private-domain-assistant-v1.0.2.zip` from [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases), or use the `extension/` folder from this repo directly.
+1. Download the latest `xhs-private-domain-assistant-v1.1.0.zip` from [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases), or use the `extension/` folder from this repo directly.
 2. Unzip the downloaded file.
 3. Open Chrome and navigate to `chrome://extensions/`, enable **Developer mode** in the top-right corner.
 4. Click **Load unpacked** and select the `extension` folder.
