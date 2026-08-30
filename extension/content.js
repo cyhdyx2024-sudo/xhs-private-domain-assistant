@@ -40,6 +40,7 @@
   let feedbackCandidate = null;
   const feedbackCandidates = new Map();
   let lastVirtualSweepAt = 0;
+  let lastComplianceFlags = [];
 
   const draftCache = new Map();
   const inFlightSignatures = new Set();
@@ -171,6 +172,20 @@
     };
   }
 
+  function getMessageScroller() {
+    return Array.from(document.querySelectorAll('.vue-recycle-scroller'))
+      .find(el => isVisible(el) && el.querySelector('.im-msg-item')) || null;
+  }
+
+  function ensureMessageWindowAtBottom() {
+    // 消息列表同样是虚拟列表：操作员上翻查历史时最新消息不会进入 DOM，会导致上下文断层或漏消息。
+    const scroller = getMessageScroller();
+    if (!scroller) return false;
+    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 8) return false;
+    scroller.scrollTop = scroller.scrollHeight;
+    return true;
+  }
+
   function parseConversationHistory(session) {
     const scroller = Array.from(document.querySelectorAll('.vue-recycle-scroller.recyScroll1'))
       .find(el => isVisible(el) && el.querySelector('.im-msg-item'));
@@ -291,6 +306,7 @@
     const controller = new AbortController();
     requestController = controller;
     inFlightSignatures.add(history.signature);
+    lastComplianceFlags = [];
     const requestStartedAt = Date.now();
     addLog('info', `分析 [${session.name}] 的 ${history.turns.length} 条会话记录…`);
     try {
@@ -311,8 +327,10 @@
         throw requestError;
       }
       const data = await response.json();
-      const active = getActiveSession();
-      const activeHistory = active ? parseConversationHistory(active) : null;
+    lastComplianceFlags = Array.isArray(data.compliance_flags) ? data.compliance_flags : [];
+    if (ensureMessageWindowAtBottom()) await sleep(260);
+    const active = getActiveSession();
+    const activeHistory = active ? parseConversationHistory(active) : null;
       if (serial !== requestSerial || !active || active.id !== session.id || activeHistory?.signature !== history.signature) {
         addLog('info', `会话已切换，丢弃 [${session.name}] 的过期结果`);
         return '';
@@ -507,6 +525,7 @@
       currentSessionId = session.id;
       updateSessionLabel(session);
     }
+    if (ensureMessageWindowAtBottom()) await sleep(260);
     const history = parseConversationHistory(session);
     if (!force && Number(messageRetryUntil.get(history.signature) || 0) > Date.now()) return;
     const cached = draftCache.get(session.id);
@@ -523,6 +542,7 @@
     const action = force && !history.needsReply ? 'manual_followup' : 'reply';
     const reply = await fetchLLMReply(history, session, action);
     if (placeDraft(session, history, reply)) updateRuntimeStatus('copilot', '草稿已按当前会话生成');
+    if (reply && lastComplianceFlags.length) addLog('warn', '草稿含敏感表述（' + lastComplianceFlags.join('、') + '），发送前请留意');
   }
 
   function isWithinTimeScope() {
@@ -631,6 +651,7 @@
       safeSetNativeValue(textarea, typed);
       await sleep(20 + Math.floor(Math.random() * 26));
     }
+    ensureMessageWindowAtBottom();
     const finalSession = getActiveSession();
     const finalHistory = finalSession ? parseConversationHistory(finalSession) : null;
     if (!finalSession || finalSession.id !== session.id || finalHistory?.signature !== history.signature || lastUserActivityAt > operationStartedAt) return { clicked: false, confirmed: false };
@@ -645,6 +666,7 @@
     const expected = cleanText(reply);
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
+      ensureMessageWindowAtBottom();
       if (getActiveSession()?.id !== sessionId) return false;
       const history = parseConversationHistory(getActiveSession());
       if (history.turns.some(turn => turn.role === 'assistant' && cleanText(turn.content) === expected)) return true;
@@ -687,6 +709,7 @@
         contactRetryUntil.set(targetId, Date.now() + 60_000);
         return;
       }
+      if (ensureMessageWindowAtBottom()) await sleep(260);
       const history = parseConversationHistory(session);
       if (!history.needsReply || !history.latestUserMsg) {
         // 例如仅有“温馨提示”的空会话，短暂跳过并继续扫描下一位。
@@ -717,6 +740,11 @@
       const reply = await fetchLLMReply(history, session, 'auto_reply');
       if (!reply) {
         if (!messageRetryUntil.has(history.signature)) messageRetryUntil.set(history.signature, Date.now() + 60_000);
+        return;
+      }
+      if (lastComplianceFlags.length) {
+        messageRetryUntil.set(history.signature, Date.now() + 24 * 60 * 60 * 1000);
+        addLog('warn', '草稿命中合规敏感词（' + lastComplianceFlags.join('、') + '），已转人工处理');
         return;
       }
       const sendResult = await humanTypeAndSend(session, history, reply, operationStartedAt);

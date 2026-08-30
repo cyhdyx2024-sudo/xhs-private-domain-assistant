@@ -599,6 +599,7 @@ class HttpHandler(BaseHTTPRequestHandler):
                 "memory_hits": memory_hits,
                 "knowledge_scope": knowledge_scope,
                 "knowledge_sources": knowledge_sources,
+                "compliance_flags": compliance_flags(llm_reply),
             })
         else:
             self.send_response(404)

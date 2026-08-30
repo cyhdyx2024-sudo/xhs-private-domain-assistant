@@ -151,4 +151,14 @@ def rewrite_failed_reply(latest_msg: str, turns: list, reply: str, issues: list[
         print(f"[LLM Rewrite Error] {error}")
         return ""
     return rewritten if not reply_quality_issues(latest_msg, turns, rewritten) else ""
+COMPLIANCE_TERMS = [
+    "第一", "唯一", "绝对", "顶级", "最好", "最强", "100%", "零风险", "稳赚",
+    "保本", "包过", "全网最低", "保证有效", "彻底治愈",
+]
+
+
+def compliance_flags(reply: str) -> list[str]:
+    """检测广告法/平台风控易触发的表述，用于提示与全自动转人工；不修改原文。"""
+    text = str(reply or "")
+    return [term for term in COMPLIANCE_TERMS if term in text]
 

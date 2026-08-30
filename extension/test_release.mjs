@@ -18,6 +18,7 @@ assert.doesNotMatch(optionsJs, /leads\/export\.csv\?token=/);
 assert.match(optionsJs, /leads\/export\.csv`/);
 assert.match(content, /if \(!isVisible\(card\) \|\| isVirtualGhost\(card\)\) return null/);
 assert.match(content, /function getVisibleContactScroller\(\)/);
+assert.match(content, /function ensureMessageWindowAtBottom\(\)/);
 assert.match(content, /isExternalActionStatusCheck\(history\.latestUserMsg\)/);
 assert.match(content, /messageAgeDecision\(history\.latestUserTurn\?\.timestamp/);
 assert.match(content, /suspendForAuthFailure/);

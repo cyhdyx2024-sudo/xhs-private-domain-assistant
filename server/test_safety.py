@@ -53,6 +53,12 @@ class ProductSafetyTest(unittest.TestCase):
     def test_product_mode_is_secure_default(self):
         self.assertTrue(agent.PRODUCT_MODE, "默认必须开启产品模式（BYOK），防止本地 Bridge 变成开放代理")
 
+    def test_compliance_flags_detection(self):
+        self.assertIn("第一", agent.compliance_flags("我们是全网第一的选择"))
+        self.assertIn("100%", agent.compliance_flags("100% 有效，您放心"))
+        self.assertIn("零风险", agent.compliance_flags("零风险，随时可以退款"))
+        self.assertEqual(agent.compliance_flags("这个要看您具体怎么用，我先按实际场景帮您核对"), [])
+
     def test_cors_origin_allowlist(self):
         handler = object.__new__(agent.HttpHandler)
         for trusted in ["https://pro.xiaohongshu.com", "https://www.xiaohongshu.com",
