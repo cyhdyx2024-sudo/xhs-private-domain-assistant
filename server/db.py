@@ -494,6 +494,26 @@ def tenant_scope(tenant: dict | None, requested: str = "default") -> str:
     return normalize_scope(f"tenant:{tenant['id']}:xhs:{tenant.get('account_id') or 'unconfigured'}:{tenant.get('business_line') or 'default'}")
 
 
+def feedback_scope_stats(scope: str) -> dict:
+    init_feedback_db()
+    scope = normalize_scope(scope)
+    with sqlite3.connect(FEEDBACK_DB) as conn:
+        total = conn.execute("SELECT COUNT(*) FROM reply_feedback WHERE scope = ? AND enabled = 1", (scope,)).fetchone()[0]
+        disabled = conn.execute("SELECT COUNT(*) FROM reply_feedback WHERE scope = ? AND enabled = 0", (scope,)).fetchone()[0]
+    return {"knowledge_count": total, "disabled_count": disabled, "scope": scope}
+
+
+def tenant_leads_csv(tenant_id: str) -> str:
+    leads = list_tenant_leads(tenant_id)
+    lines = ["客户昵称,线索类型,联系方式,意向场景,捕获时间"]
+    for lead in leads:
+        lines.append(
+            f'"{_csv_safe(lead.get("user_name", ""))}",{_csv_safe(lead.get("lead_type", ""))},'
+            f'{_csv_safe(lead.get("lead_value", ""))},"{_csv_safe(lead.get("context_summary", ""))}",{lead.get("created_at", "")}'
+        )
+    return "\n".join(lines)
+
+
 def normalize_scope(value: str) -> str:
     scope = re.sub(r"[^a-zA-Z0-9_:.\-\u4e00-\u9fff]", "_", str(value or "default")).strip("_")
     return scope[:120] or "default"
@@ -692,4 +712,3 @@ def set_feedback_enabled(feedback_id: int, enabled: bool, scope: str = "default"
 def delete_feedback(feedback_id: int, scope: str = "default") -> bool:
     """兼容旧扩展：delete 现在等价于软停用，保留案例和审计记录。"""
     return set_feedback_enabled(feedback_id, False, scope)
-

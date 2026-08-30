@@ -308,11 +308,7 @@ class HttpHandler(BaseHTTPRequestHandler):
                 return
             query = parse_qs(urlparse(self.path).query)
             scope = tenant_scope(tenant, query.get("scope", ["default"])[0])
-            init_feedback_db()
-            with sqlite3.connect(FEEDBACK_DB) as conn:
-                total = conn.execute("SELECT COUNT(*) FROM reply_feedback WHERE scope = ? AND enabled = 1", (scope,)).fetchone()[0]
-                disabled = conn.execute("SELECT COUNT(*) FROM reply_feedback WHERE scope = ? AND enabled = 0", (scope,)).fetchone()[0]
-            self._send_json(200, {"ok": True, "knowledge_count": total, "disabled_count": disabled, "scope": scope})
+            self._send_json(200, {"ok": True, **feedback_scope_stats(scope)})
         elif path == "/feedback/list":
             tenant = self._tenant()
             if PRODUCT_MODE and not tenant:
@@ -342,11 +338,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             if not tenant:
                 self._send_json(401, {"ok": False, "error": "unauthorized"})
                 return
-            leads = list_tenant_leads(tenant["id"])
-            csv_lines = ["客户昵称,线索类型,联系方式,意向场景,捕获时间"]
-            for l in leads:
-                csv_lines.append(f'"{_csv_safe(l.get("user_name",""))}",{_csv_safe(l.get("lead_type",""))},{_csv_safe(l.get("lead_value",""))},"{_csv_safe(l.get("context_summary",""))}",{l.get("created_at","")}')
-            csv_body = "\n".join(csv_lines).encode("utf-8-sig")
+            csv_body = tenant_leads_csv(tenant["id"]).encode("utf-8-sig")
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
             self.send_header("Content-Disposition", "attachment; filename=leads_export.csv")
@@ -621,6 +613,7 @@ def main():
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), HttpHandler)
+    init_feedback_db()
     print(f"✅ 私域接待 LLM 网关已启动: http://{args.host}:{args.port}")
     try:
         server.serve_forever()
@@ -630,4 +623,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
