@@ -8,14 +8,16 @@ assert.equal(safety.retryDelayMs(401), Infinity);
 assert.equal(safety.retryDelayMs(500, 1), 60_000);
 assert.equal(safety.retryDelayMs(500, 2), 120_000);
 
-const now = Date.parse('2026-08-29T12:00:00+08:00');
+// 用运行环境本地时区构造期望值，避免 CI（UTC）与开发机（Asia/Shanghai）产生假失败。
+const nowDate = new Date(2026, 7, 29, 12, 0, 0);
+const now = nowDate.getTime();
 assert.equal(safety.messageAgeDecision(now - 30 * 60_000, now).action, 'auto');
 assert.equal(safety.messageAgeDecision(now - 3 * 60 * 60_000, now).action, 'manual');
 assert.equal(safety.messageAgeDecision(now - 25 * 60 * 60_000, now).action, 'skip');
 assert.equal(safety.messageAgeDecision(0, now).action, 'manual');
-assert.equal(safety.parseMessageTimestamp('2026-08-29 10:30:00', new Date(now)), Date.parse('2026-08-29T10:30:00+08:00'));
-assert.equal(safety.parseMessageTimestamp('昨天 10:30', new Date(now)), Date.parse('2026-08-28T10:30:00+08:00'));
-assert.equal(safety.parseMessageTimestamp('08-29 10:30', new Date(now)), Date.parse('2026-08-29T10:30:00+08:00'));
+assert.equal(safety.parseMessageTimestamp('2026-08-29 10:30:00', nowDate), new Date(2026, 7, 29, 10, 30, 0).getTime());
+assert.equal(safety.parseMessageTimestamp('昨天 10:30', nowDate), new Date(2026, 7, 28, 10, 30, 0).getTime());
+assert.equal(safety.parseMessageTimestamp('08-29 10:30', nowDate), new Date(2026, 7, 29, 10, 30, 0).getTime());
 
 assert.equal(safety.isExcludedContact('用户已注销', '[超时未回复]'), true);
 assert.equal(safety.isExcludedContact('平台系统通知', ''), true);
