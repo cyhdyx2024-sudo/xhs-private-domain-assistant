@@ -104,6 +104,9 @@ def reply_quality_issues(latest_msg: str, turns: list, reply: str) -> list[str]:
         issues.append("客户只是短促确认在线，不应突然推销或索要联系方式")
     if _asks_for_contact(recent_assistant) and not _has_contact_intent(latest) and _asks_for_contact(current):
         issues.append("客服上一轮已索要联系方式，本轮重复索要")
+    if re.search(r"微信(?:是|号)?[:：s]*[a-zA-Z0-9_-]{5,}|手机(?:是|号)?[:：s]*1[3-9]d{9}", latest):
+        if _asks_for_contact(current):
+            issues.append("客户已经提供了联系方式，不应再次索要")
     if _is_external_action_status_check(latest):
         if re.search(r"实际效果|操作流程|了解(?:一下)?|产品介绍|怎么用", current):
             issues.append("客户在确认外部动作状态，回复却把话题岔到产品介绍")
@@ -117,7 +120,7 @@ def reply_quality_issues(latest_msg: str, turns: list, reply: str) -> list[str]:
         r"(?:我|这边)?(?:这就|马上|稍后|待会儿?|现在|回头).{0,10}(?:添加|加|发送|发|通过|处理|提交|申请|标记|记录)|"
         r"(?:我|这边)?帮您?.{0,6}(?:添加|加|发送|发|通过|标记|提交)(?:一下)?(?:申请|好友|资料|链接)?",
         current,
-    ) and not re.search(r"无法|不能|暂时.{0,4}(?:操作|确认)|需要人工|转人工|您可以", current):
+    ) and not re.search(r"无法|不能|暂时.{0,4}(?:操作|确认)|需要人工|转人工|您可以|收到|已记下|已收到", current):
         issues.append("回复承诺执行当前会话无法核验的外部动作")
     if re.search(r"多少钱|价格|怎么收费|收费吗|费用", latest_msg) and re.search(r"\d[\d,.]*\s*(?:元|块)|每月|每年|起", current):
         issues.append("业务资料没有给出实时价格，回复却自行报价")
@@ -161,4 +164,3 @@ def compliance_flags(reply: str) -> list[str]:
     """检测广告法/平台风控易触发的表述，用于提示与全自动转人工；不修改原文。"""
     text = str(reply or "")
     return [term for term in COMPLIANCE_TERMS if term in text]
-

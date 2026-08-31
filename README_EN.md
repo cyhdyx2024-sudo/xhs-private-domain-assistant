@@ -1,4 +1,4 @@
-# Social CRM Copilot for Web Workbenches (Open Source AI Assistant)
+# AI Messaging Copilot for Xiaohongshu Professional Accounts
 
 [中文文档 (Chinese)](README.md) | [English Documentation](README_EN.md)
 

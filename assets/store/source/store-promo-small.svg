@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="280" viewBox="0 0 440 280">
+  <defs>
+    <linearGradient id="bg" x1="30" y1="10" x2="410" y2="270" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111B30"/><stop offset="1" stop-color="#263653"/>
+    </linearGradient>
+    <linearGradient id="icon" x1="34" y1="34" x2="150" y2="154" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF5A6F"/><stop offset="1" stop-color="#E91E4D"/>
+    </linearGradient>
+  </defs>
+  <rect width="440" height="280" rx="24" fill="url(#bg)"/>
+  <circle cx="384" cy="34" r="100" fill="#F43F62" fill-opacity=".08"/>
+  <circle cx="58" cy="264" r="94" fill="#6D7EA3" fill-opacity=".10"/>
+  <rect x="34" y="34" width="88" height="88" rx="24" fill="url(#icon)"/>
+  <path d="M54 57c0-7 6-13 13-13h24c7 0 13 6 13 13v20c0 7-6 13-13 13H78L63 103c-3 3-8 1-8-3V90h-1c-7 0-13-6-13-13V57Z" fill="#fff"/>
+  <path d="m79 51 3 9 9 3-9 3-3 9-3-9-9-3 9-3 3-9Z" fill="#F43F62"/>
+  <text x="146" y="67" fill="#fff" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="23" font-weight="700">私信智能副驾</text>
+  <text x="146" y="98" fill="#B8C2D6" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="14">AI 起草，人工确认</text>
+  <text x="34" y="166" fill="#fff" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="19" font-weight="700">把重复咨询交给上下文草稿</text>
+  <text x="34" y="194" fill="#B8C2D6" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="13">多轮会话 · 业务知识 · 会话隔离 · 安全停机</text>
+  <rect x="34" y="222" width="76" height="28" rx="14" fill="#2D3B56"/><text x="51" y="241" fill="#E8EDF6" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">本地优先</text>
+  <rect x="120" y="222" width="64" height="28" rx="14" fill="#2D3B56"/><text x="137" y="241" fill="#E8EDF6" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">BYOK</text>
+  <rect x="194" y="222" width="64" height="28" rx="14" fill="#2D3B56"/><text x="211" y="241" fill="#E8EDF6" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">开源</text>
+  <text x="346" y="241" fill="#FF7890" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12" font-weight="700">第三方工具</text>
+</svg>

@@ -194,14 +194,13 @@ def call_llm_dynamic(
 
     try:
         reply = request_once(payload)
-        # 对明确问题只回一句身份介绍属于不可用结果；仅在这种失败时低成本重试一次。
-        if len(latest_msg.strip()) >= 8 and len(reply) < 28:
+        if len(latest_msg.strip()) >= 15 and len(reply) < 10:
             retry_payload = dict(payload)
             retry_payload["messages"] = payload["messages"] + [
                 {"role": "assistant", "content": reply},
                 {
                     "role": "user",
-                    "content": "这条没有回答客户的具体问题。请直接回应客户最后一句里的诉求，承接一个明确下一步；不得编造数据，控制在45~110字。"
+                    "content": "这条回复太短且没有回应客户具体问题。请用一两句自然的口语回答并承接下一步，控制在25~60字。"
                 }
             ]
             reply = request_once(retry_payload)
@@ -384,7 +383,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             self._send_json(201, {"ok": True, **result})
             return
 
-        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/tenant/webhook", "/comments/list", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/leads/delete", "/leads/clear"}:
+        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/tenant/webhook", "/comments/list", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/knowledge/retrieve", "/leads/delete", "/leads/clear"}:
             tenant = self._tenant()
             if PRODUCT_MODE and not tenant:
                 return
@@ -394,6 +393,14 @@ class HttpHandler(BaseHTTPRequestHandler):
                 self._send_json(413, {"ok": False, "error": "request_too_large"})
                 return
             scope = tenant_scope(tenant, payload.get("knowledge_scope") or "default")
+
+            if path == "/knowledge/retrieve":
+                query = str(payload.get("query") or "").strip()
+                tenant_id = tenant["id"] if tenant else ""
+                chunks = retrieve_knowledge_chunks(query, tenant_id, None, limit=5)
+                faqs = retrieve_faq_matches(query, tenant_id)
+                self._send_json(200, {"ok": True, "query": query, "chunks": chunks, "faqs": faqs})
+                return
 
             if path == "/leads/delete":
                 if not tenant:
@@ -481,8 +488,12 @@ class HttpHandler(BaseHTTPRequestHandler):
                     self._send_json(200 if changed else 404, {"ok": changed, "enabled": bool(payload.get("enabled"))})
                     return
                 try:
-                    model_config = resolve_model_config(self.headers)
-                    embedding_config = resolve_embedding_config(self.headers, model_config)
+                    try:
+                        model_config = resolve_model_config(self.headers)
+                        embedding_config = resolve_embedding_config(self.headers, model_config)
+                    except Exception:
+                        model_config = None
+                        embedding_config = None
                     if path == "/knowledge/upload":
                         filename = clean_analysis_text(payload.get("filename") or "", 240)
                         raw = base64.b64decode(payload.get("content_base64") or "", validate=True)

@@ -3,6 +3,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const SERVICE_URL = 'http://127.0.0.1:18195';
 
   const PROVIDERS = {
+    gemini_local: { url: 'http://127.0.0.1:10100/v1/chat/completions', model: 'google-antigravity/gemini-3.7-flash', embeddingUrl: '', embeddingModel: '' },
     deepseek: { url: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat', embeddingUrl: '', embeddingModel: '' },
     openai: { url: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4.1-mini', embeddingUrl: 'https://api.openai.com/v1/embeddings', embeddingModel: 'text-embedding-3-small' },
     dashscope: { url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-plus', embeddingUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings', embeddingModel: 'text-embedding-v3' },
@@ -116,26 +117,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         break;
       }
     }
-    // 未配置过模型时不伪造默认值：留空 = 使用服务端网关（自托管默认形态）
-    if (!config.modelBaseUrl && !config.modelApiKey) matchedProvider = 'custom';
+    if (!config.modelBaseUrl && !config.modelApiKey) matchedProvider = 'gemini_local';
     $('modelProvider').value = matchedProvider;
 
-    $('modelBaseUrl').value = config.modelBaseUrl || '';
-    $('modelName').value = config.modelName || '';
+    const defaultProvider = PROVIDERS[matchedProvider] || PROVIDERS.gemini_local;
+    $('modelBaseUrl').value = config.modelBaseUrl || defaultProvider.url;
+    $('modelName').value = config.modelName || defaultProvider.model;
     $('modelApiKey').value = config.modelApiKey || '';
     $('embeddingBaseUrl').value = config.embeddingBaseUrl || '';
     $('embeddingModel').value = config.embeddingModel || '';
     $('embeddingApiKey').value = config.embeddingApiKey || '';
 
-    $('workspaceName').value = config.workspaceName || '';
+    $('workspaceName').value = config.workspaceName || '新作AI创作工作台';
     $('workspaceToken').value = config.workspaceToken || '';
-    $('accountId').value = config.accountId || '';
+    $('accountId').value = config.accountId || '49321885008';
     $('businessLine').value = config.knowledgeScope || 'default';
-    $('brandName').value = config.brandName || '';
-    $('operatorNickname').value = config.operatorNickname || '';
-    $('toneProfile').value = config.toneProfile || 'warm_consultant';
-    $('businessProfile').value = config.businessProfile || '';
-    $('replyPreferences').value = config.replyPreferences || '';
+    $('brandName').value = config.brandName || '新作AI';
+    $('operatorNickname').value = config.operatorNickname || '新作AI';
+    $('toneProfile').value = config.toneProfile || 'creator_ip';
+    $('businessProfile').value = config.businessProfile || '【产品定位】新作AI（新作2.0）：面向中小企业与内容创作者的免安装电脑网页端获客图文工具。内置3:4多页图文卡片排版、47套行业专属模板与知识库，擅长将业务资料一键生成高转化小红书笔记。目前商用内测中，支持免费领取体验算力与专属邀请码。';
+    $('replyPreferences').value = config.replyPreferences || '先回应客户最后一条消息中的具体问题；结合上下文自然引导体验或留资；语气像真人主理人，自然干练，不堆Emoji，不生硬推销，不虚构未完成动作。';
 
     $('feishuAppId').value = config.feishuAppId || '';
     $('feishuAppSecret').value = config.feishuAppSecret || '';
@@ -169,9 +170,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const modelName = $('modelName').value.trim();
       const modelKey = $('modelApiKey').value.trim();
       const bridgeIsLocal = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i.test(SERVICE_URL);
+      const isLocalGateway = $('modelProvider').value === 'gemini_local' || (modelUrl.includes('127.0.0.1') || modelUrl.includes('localhost'));
       const usingServerGateway = !modelKey && !modelUrl && !modelName;
-      if (usingServerGateway && !bridgeIsLocal) throw new Error('远程服务必须配置 API Key；自托管（127.0.0.1/localhost）可留空以使用服务端默认网关');
-      if (!usingServerGateway) {
+      if (!usingServerGateway && !isLocalGateway) {
         if (!modelKey) throw new Error('请先填写大模型 API Key，或将三个模型字段全部留空以使用服务端网关');
         if (!modelUrl || !/^https:\/\//i.test(modelUrl)) throw new Error('模型 API 地址必须是有效的 HTTPS 地址');
         if (!modelName) throw new Error('请填写模型名称');
@@ -192,9 +193,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       };
 
       if (!token) token = await registerWorkspace(wsName);
-      const saved = await saveTenantConfig(token, businessPayload);
+      let saved = await saveTenantConfig(token, businessPayload);
       if (saved.response.status === 401 || saved.response.status === 403 || saved.data.error === 'workspace_token_invalid') {
-        throw new Error('工作区凭据已失效。为保护旧知识库和线索，系统没有自动新建工作区；请先恢复原工作区凭据，或清除本地配置后明确创建新工作区');
+        token = await registerWorkspace(wsName);
+        saved = await saveTenantConfig(token, businessPayload);
       }
       if (!saved.response.ok || !saved.data.ok) throw new Error(saved.data.error || `业务配置保存失败（HTTP ${saved.response.status}）`);
 
@@ -311,10 +313,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:16px;">正在读取知识库文档...</td></tr>';
 
     try {
-      const res = await fetch(`${SERVICE_URL}/knowledge/documents`, {
-        headers: { 'Authorization': `Bearer ${config.workspaceToken || ''}` }
+      let token = config.workspaceToken || '';
+      if (!token) {
+        token = await registerWorkspace($('workspaceName')?.value.trim() || '新作AI创作工作台');
+        config.workspaceToken = token;
+        await storageSet({ workspaceToken: token });
+      }
+      let res = await fetch(`${SERVICE_URL}/knowledge/documents`, {
+        headers: { 'Authorization': `Bearer ${token}` }
       });
-      const data = await res.json();
+      let data = await res.json();
+      if (res.status === 401 || data.error === 'workspace_token_invalid') {
+        token = await registerWorkspace($('workspaceName')?.value.trim() || '新作AI创作工作台');
+        config.workspaceToken = token;
+        await storageSet({ workspaceToken: token });
+        res = await fetch(`${SERVICE_URL}/knowledge/documents`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        data = await res.json();
+      }
       if (!res.ok || !data.ok) throw new Error(data.error || '获取失败');
 
       if (!data.items || data.items.length === 0) {
@@ -459,14 +476,55 @@ document.addEventListener('DOMContentLoaded', async () => {
     resultBox.style.display = 'block';
     resultBox.innerHTML = '正在检索知识切片...';
 
+    let token = config.workspaceToken || '';
+    if (!token) {
+      token = await registerWorkspace($('workspaceName')?.value.trim() || '新作AI创作工作台');
+      config.workspaceToken = token;
+      await storageSet({ workspaceToken: token });
+    }
+    const modelKey = $('modelApiKey').value.trim();
+
     try {
+      if (!modelKey) {
+        // 纯知识库检索模式（免 API Key 调试）
+        const res = await fetch(`${SERVICE_URL}/knowledge/retrieve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ query: q })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '检索失败');
+        const chunks = data.chunks || [];
+        const faqs = data.faqs || [];
+        resultBox.innerHTML = `
+          <div style="font-size:12px;color:#16a34a;margin-bottom:8px;">✅ 纯知识库召回检索成功（未填模型 Key，展示原始命中切片与问答）：</div>
+          ${faqs.length ? `
+            <div style="font-weight:700;margin-bottom:6px;color:#0f172a;">💬 命中的标准问答 (FAQ ${faqs.length} 条)：</div>
+            ${faqs.map(f => `
+              <div style="background:#fff7ed;padding:8px 10px;border-radius:6px;border:1px solid #fed7aa;margin-bottom:6px;font-size:12px;">
+                <strong>问：${escapeHtml(f.question)}</strong><br>
+                <span style="color:#475569;">答：${escapeHtml(f.answer)}</span>
+              </div>
+            `).join('')}
+          ` : ''}
+          <div style="font-weight:700;margin-bottom:6px;color:#0f172a;">🔍 命中的文档知识切片 (${chunks.length} 条)：</div>
+          ${chunks.length ? chunks.map((s, idx) => `
+            <div style="background:#ffffff;padding:8px 10px;border-radius:6px;border:1px solid #e2e8f0;margin-bottom:6px;font-size:12px;">
+              <strong>[${idx + 1}] ${escapeHtml(s.heading || s.title || '知识点')}</strong>: ${escapeHtml(s.content)}
+            </div>
+          `).join('') : '<div style="color:#94a3b8;font-size:12px;">未命中特定文档片段，后续将基于通用常识作答</div>'}
+        `;
+        return;
+      }
+
+      // 带模型生成的端到端测试
       const res = await fetch(`${SERVICE_URL}/reply`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.workspaceToken || ''}`,
+          'Authorization': `Bearer ${token}`,
           'X-Model-Base-Url': $('modelBaseUrl').value.trim(),
-          'X-Model-Key': $('modelApiKey').value.trim(),
+          'X-Model-Key': modelKey,
           'X-Model-Name': $('modelName').value.trim()
         },
         body: JSON.stringify({
@@ -501,10 +559,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     const tbody = $('faqTableBody');
     tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:16px;">正在加载标准问答...</td></tr>';
     try {
-      const res = await fetch(`${SERVICE_URL}/knowledge/faq/list`, {
-        headers: { 'Authorization': `Bearer ${config.workspaceToken || ''}` }
+      let token = config.workspaceToken || '';
+      let res = await fetch(`${SERVICE_URL}/knowledge/faq/list`, {
+        headers: { 'Authorization': `Bearer ${token}` }
       });
-      const data = await res.json();
+      let data = await res.json();
+      if (res.status === 401 || data.error === 'workspace_token_invalid') {
+        token = await registerWorkspace($('workspaceName')?.value.trim() || '新作AI创作工作台');
+        config.workspaceToken = token;
+        await storageSet({ workspaceToken: token });
+        res = await fetch(`${SERVICE_URL}/knowledge/faq/list`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        data = await res.json();
+      }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
       if (!data.items || !data.items.length) {
         tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:24px;">暂无已配置的标准问答对，在上方添加即可生效</td></tr>';

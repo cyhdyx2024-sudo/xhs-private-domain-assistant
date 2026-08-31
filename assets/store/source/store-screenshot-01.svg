@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
+  <defs>
+    <linearGradient id="canvas" x1="0" y1="0" x2="1280" y2="800" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F7F8FC"/><stop offset="1" stop-color="#EEF1F7"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="940" y1="80" x2="1210" y2="700" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF526A"/><stop offset="1" stop-color="#E91E4D"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="1280" height="800" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="20" stdDeviation="26" flood-color="#18233B" flood-opacity=".12"/>
+    </filter>
+  </defs>
+  <rect width="1280" height="800" fill="url(#canvas)"/>
+  <text x="64" y="66" fill="#18233B" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="28" font-weight="700">AI 私信起草，人工始终在决策位</text>
+  <text x="64" y="102" fill="#697386" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="17">适配专业号客服工作台 · 本地 Bridge · 自带模型 Key · 演示数据</text>
+  <rect x="54" y="132" width="1172" height="610" rx="24" fill="#fff" filter="url(#shadow)"/>
+  <rect x="54" y="132" width="1172" height="54" rx="24" fill="#18233B"/>
+  <rect x="54" y="164" width="1172" height="22" fill="#18233B"/>
+  <circle cx="84" cy="159" r="7" fill="#FF6B7E"/><circle cx="108" cy="159" r="7" fill="#F8C65A"/><circle cx="132" cy="159" r="7" fill="#49C88A"/>
+  <text x="174" y="166" fill="#DDE3EE" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="14">专业号客服工作台 · 第三方副驾演示</text>
+
+  <rect x="54" y="186" width="252" height="556" fill="#F8FAFD"/>
+  <text x="78" y="228" fill="#18233B" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="17" font-weight="700">会话</text>
+  <rect x="74" y="248" width="212" height="76" rx="14" fill="#FFF0F3"/>
+  <circle cx="103" cy="286" r="19" fill="#FFD7DF"/><text x="96" y="293" fill="#D81B45" font-family="sans-serif" font-size="18" font-weight="700">A</text>
+  <text x="134" y="278" fill="#18233B" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14" font-weight="700">示例客户 A</text>
+  <text x="134" y="301" fill="#697386" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">想了解适合我的方案…</text>
+  <rect x="74" y="336" width="212" height="76" rx="14" fill="#fff"/>
+  <circle cx="103" cy="374" r="19" fill="#E8EDFA"/><text x="96" y="381" fill="#56627A" font-family="sans-serif" font-size="18" font-weight="700">B</text>
+  <text x="134" y="366" fill="#18233B" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14" font-weight="700">示例客户 B</text>
+  <text x="134" y="389" fill="#697386" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">资料可以怎么导入？</text>
+  <rect x="74" y="424" width="212" height="76" rx="14" fill="#fff"/>
+  <circle cx="103" cy="462" r="19" fill="#E8F7F0"/><text x="96" y="469" fill="#23835B" font-family="sans-serif" font-size="18" font-weight="700">C</text>
+  <text x="134" y="454" fill="#18233B" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14" font-weight="700">示例客户 C</text>
+  <text x="134" y="477" fill="#697386" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">价格和服务周期是？</text>
+
+  <rect x="306" y="186" width="560" height="556" fill="#fff"/>
+  <text x="334" y="226" fill="#18233B" font-family="-apple-system,'PingFang SC',sans-serif" font-size="17" font-weight="700">示例客户 A</text>
+  <line x1="306" y1="246" x2="866" y2="246" stroke="#E7EAF1"/>
+  <rect x="334" y="280" width="308" height="70" rx="16" fill="#F1F3F8"/>
+  <text x="353" y="309" fill="#263147" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14">我们团队每天要处理很多重复咨询，</text>
+  <text x="353" y="332" fill="#263147" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14">想了解这个副驾怎么配合客服？</text>
+  <rect x="456" y="382" width="378" height="92" rx="16" fill="#FFF0F3"/>
+  <text x="476" y="410" fill="#991C3A" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14">它会先读取当前会话和业务资料，生成一版草稿。</text>
+  <text x="476" y="435" fill="#991C3A" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14">客服可以直接修改，确认后再由人工发送。</text>
+  <text x="476" y="459" fill="#991C3A" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">AI 草稿 · 尚未发送</text>
+  <rect x="334" y="646" width="500" height="64" rx="14" fill="#FAFBFD" stroke="#DDE2EC"/>
+  <text x="354" y="684" fill="#697386" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14">草稿已预填，人工检查后发送</text>
+
+  <rect x="890" y="208" width="312" height="502" rx="22" fill="#18233B"/>
+  <rect x="890" y="208" width="312" height="86" rx="22" fill="url(#accent)"/>
+  <rect x="890" y="270" width="312" height="24" fill="url(#accent)"/>
+  <circle cx="926" cy="250" r="19" fill="#fff" fill-opacity=".96"/>
+  <path d="M916 242h20v13h-11l-8 7v-7h-1z" fill="#ED2752"/>
+  <text x="956" y="246" fill="#fff" font-family="-apple-system,'PingFang SC',sans-serif" font-size="17" font-weight="700">私信智能副驾</text>
+  <text x="956" y="270" fill="#FFE5EA" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">V1.1 · 本地优先</text>
+  <rect x="912" y="316" width="268" height="58" rx="14" fill="#253149"/>
+  <circle cx="936" cy="345" r="6" fill="#4CD693"/>
+  <text x="952" y="340" fill="#fff" font-family="-apple-system,'PingFang SC',sans-serif" font-size="13" font-weight="700">副驾模式</text>
+  <text x="952" y="359" fill="#AEB8CA" font-family="-apple-system,'PingFang SC',sans-serif" font-size="11">只预填草稿，不会自动发送</text>
+  <rect x="912" y="392" width="268" height="46" rx="12" fill="#F43F62"/>
+  <text x="970" y="421" fill="#fff" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14" font-weight="700">为当前会话生成草稿</text>
+  <text x="912" y="474" fill="#AEB8CA" font-family="-apple-system,'PingFang SC',sans-serif" font-size="11">执行轨迹</text>
+  <rect x="912" y="490" width="268" height="64" rx="12" fill="#202C42"/>
+  <text x="930" y="516" fill="#F6F8FB" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">已识别当前会话：示例客户 A</text>
+  <text x="930" y="537" fill="#7FE0B1" font-family="-apple-system,'PingFang SC',sans-serif" font-size="11">会话身份与消息签名已核对</text>
+  <rect x="912" y="566" width="268" height="90" rx="12" fill="#202C42"/>
+  <text x="930" y="593" fill="#F6F8FB" font-family="-apple-system,'PingFang SC',sans-serif" font-size="12">业务资料命中 3 段</text>
+  <text x="930" y="615" fill="#AEB8CA" font-family="-apple-system,'PingFang SC',sans-serif" font-size="11">草稿已按当前上下文生成</text>
+  <text x="930" y="637" fill="#AEB8CA" font-family="-apple-system,'PingFang SC',sans-serif" font-size="11">发送动作等待人工确认</text>
+  <rect x="990" y="698" width="132" height="24" rx="12" fill="#FFF0F3"/>
+  <text x="1010" y="715" fill="#C51D45" font-family="-apple-system,'PingFang SC',sans-serif" font-size="11" font-weight="700">界面示意 · 演示数据</text>
+</svg>

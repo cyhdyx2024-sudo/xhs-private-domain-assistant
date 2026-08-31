@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="560" viewBox="0 0 1400 560">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1400" y2="560" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101A2E"/><stop offset="1" stop-color="#2A3A59"/>
+    </linearGradient>
+    <linearGradient id="pink" x1="95" y1="90" x2="300" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF5A6F"/><stop offset="1" stop-color="#E91E4D"/>
+    </linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="24" stdDeviation="30" flood-color="#000" flood-opacity=".28"/></filter>
+  </defs>
+  <rect width="1400" height="560" fill="url(#bg)"/>
+  <circle cx="1320" cy="60" r="250" fill="#F43F62" fill-opacity=".09"/>
+  <circle cx="70" cy="560" r="260" fill="#7585AA" fill-opacity=".10"/>
+  <rect x="92" y="84" width="168" height="168" rx="48" fill="url(#pink)" filter="url(#shadow)"/>
+  <path d="M128 128c0-15 12-27 27-27h45c15 0 27 12 27 27v39c0 15-12 27-27 27h-23l-29 26c-6 5-15 1-15-7v-19h-5c-15 0-27-12-27-27v-39Z" fill="#fff"/>
+  <path d="m176 112 6 18 18 6-18 6-6 18-6-18-18-6 18-6 6-18Z" fill="#F43F62"/>
+  <text x="92" y="333" fill="#fff" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="52" font-weight="750">私信智能副驾</text>
+  <text x="92" y="386" fill="#BFC8DA" font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif" font-size="25">AI 起草 · 人工确认 · 本地自托管</text>
+  <rect x="92" y="430" width="132" height="42" rx="21" fill="#2E3D59"/><text x="125" y="458" fill="#EDF1F8" font-family="-apple-system,'PingFang SC',sans-serif" font-size="18">会话隔离</text>
+  <rect x="240" y="430" width="132" height="42" rx="21" fill="#2E3D59"/><text x="273" y="458" fill="#EDF1F8" font-family="-apple-system,'PingFang SC',sans-serif" font-size="18">业务知识</text>
+  <rect x="388" y="430" width="132" height="42" rx="21" fill="#2E3D59"/><text x="427" y="458" fill="#EDF1F8" font-family="-apple-system,'PingFang SC',sans-serif" font-size="18">安全停机</text>
+
+  <rect x="650" y="68" width="650" height="424" rx="28" fill="#fff" filter="url(#shadow)"/>
+  <rect x="650" y="68" width="650" height="64" rx="28" fill="#F43F62"/>
+  <rect x="650" y="108" width="650" height="24" fill="#F43F62"/>
+  <text x="684" y="108" fill="#fff" font-family="-apple-system,'PingFang SC',sans-serif" font-size="22" font-weight="700">当前会话 · 示例客户</text>
+  <rect x="682" y="166" width="330" height="72" rx="18" fill="#F1F3F7"/>
+  <text x="706" y="196" fill="#263147" font-family="-apple-system,'PingFang SC',sans-serif" font-size="16">想了解你们怎么帮助客服减少重复回复？</text>
+  <text x="706" y="220" fill="#7A8498" font-family="-apple-system,'PingFang SC',sans-serif" font-size="13">客户消息 · 演示数据</text>
+  <rect x="808" y="266" width="458" height="104" rx="18" fill="#FFF0F3"/>
+  <text x="834" y="298" fill="#8F1935" font-family="-apple-system,'PingFang SC',sans-serif" font-size="16">副驾会结合当前对话和业务资料生成草稿，</text>
+  <text x="834" y="325" fill="#8F1935" font-family="-apple-system,'PingFang SC',sans-serif" font-size="16">客服修改确认后再发送，不替代人工判断。</text>
+  <text x="834" y="352" fill="#C62850" font-family="-apple-system,'PingFang SC',sans-serif" font-size="13">AI 草稿 · 未发送</text>
+  <rect x="682" y="408" width="584" height="52" rx="14" fill="#F8FAFD" stroke="#DDE2EC"/>
+  <circle cx="710" cy="434" r="7" fill="#36C98D"/>
+  <text x="730" y="440" fill="#39445A" font-family="-apple-system,'PingFang SC',sans-serif" font-size="15">身份已核对 · 命中 3 段业务资料 · 等待人工确认</text>
+  <text x="1198" y="522" fill="#AEB8CA" font-family="-apple-system,'PingFang SC',sans-serif" font-size="14">独立第三方开源工具</text>
+</svg>

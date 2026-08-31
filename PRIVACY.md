@@ -30,6 +30,13 @@
 
 使用者是其业务数据的控制者，应自行取得必要授权并遵守适用的隐私、劳动、消费者保护及平台规则。
 
+## Chrome Web Store Limited Use
+
+- 本扩展只为“在使用者自己的专业号客服页面中生成、校准并管理私信回复草稿”这一单一用途处理数据。
+- 页面会话、联系方式和凭据不用于广告、画像、转售、信用判断或与该单一用途无关的分析；项目维护者不会通过本项目读取这些数据。
+- 数据仅在实现用户主动启用的功能所必需时，传给用户自建 Bridge、用户选择的模型服务商，以及用户主动配置的飞书/企微服务。
+- The use of information received from Chrome APIs will adhere to the Chrome Web Store User Data Policy, including the Limited Use requirements.
+
 ---
 
 This project is local-first and self-hosted. It contains no ads, analytics SDKs, or maintainer-operated telemetry. Model keys and configuration are stored in Chrome local storage; relevant conversation excerpts are sent to the user's local Bridge and then to the model provider selected by the user. Optional Feishu/WeCom integrations transmit only when configured. Users control retention and deletion of browser and Bridge data.

@@ -3,20 +3,25 @@ from __future__ import annotations
 
 import base64
 import binascii
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
 import math
 import os
+from pathlib import Path
 import re
+import secrets
 import sqlite3
+from urllib.parse import urlparse
+from gateway import PRODUCT_MODE, ALLOWED_MODEL_HOSTS
 import urllib.error
 import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
-from db import FEEDBACK_DB, clean_analysis_text, init_feedback_db
+from db import FEEDBACK_DB, clean_analysis_text, init_feedback_db, _terms
 
 def _xml_text(data: bytes) -> str:
     root = ET.fromstring(data)
@@ -53,6 +58,14 @@ def extract_uploaded_text(filename: str, content: bytes) -> tuple[str, str]:
                 text.append(f"第 {index} 页\n{_xml_text(archive.read(name))}")
             return "\n\n".join(text), "pptx"
     if suffix == ".pdf":
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(io.BytesIO(content))
+            text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
+            if len(clean_analysis_text(text, 5000)) >= 20:
+                return text, "pdf"
+        except Exception:
+            pass
         process = subprocess.run(
             ["pdftotext", "-layout", "-", "-"], input=content, capture_output=True, timeout=30,
         )
@@ -94,6 +107,8 @@ def resolve_embedding_config(headers: Any, model_config: dict) -> dict:
     model = str(headers.get("X-Embedding-Model") or "text-embedding-3-small").strip()
     parsed = urlparse(url)
     if PRODUCT_MODE and (parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_MODEL_HOSTS):
+        if parsed.hostname in ("127.0.0.1", "localhost"):
+            return {"url": "", "key": "", "model": ""}
         raise ValueError("embedding_endpoint_not_allowed")
     key = str(headers.get("X-Embedding-Key") or model_config["key"]).strip()
     return {"url": url, "key": key, "model": model}
@@ -114,6 +129,7 @@ def embed_texts(config: dict, texts: list[str]) -> list[list[float]]:
 
 
 def ingest_knowledge_document(tenant: dict, title: str, text: str, source_type: str, source_uri: str, embedding_config: dict | None) -> dict:
+    init_feedback_db()
     normalized = re.sub(r"\n{3,}", "\n\n", str(text or "")).strip()
     if len(normalized) < 20:
         raise ValueError("document_has_too_little_text")
@@ -169,6 +185,19 @@ def ingest_knowledge_document(tenant: dict, title: str, text: str, source_type: 
 
 def list_knowledge_documents(tenant_id: str) -> list[dict]:
     init_feedback_db()
+    # 自动种子数据同步：如果是新创建的工作区，自动同步预设产品手册
+    with sqlite3.connect(FEEDBACK_DB) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM knowledge_documents WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
+        if count == 0:
+            seed_path = Path("server/data/seed_knowledge_xinzuo.md")
+            pdf_path = Path("server/data/新作AI2.0官方产品手册.pdf")
+            if seed_path.exists():
+                tenant = {"id": tenant_id, "workspace_name": "默认工作区"}
+                ingest_knowledge_document(tenant, "新作AI 2.0官方产品手册与常见问答.md", seed_path.read_text(encoding="utf-8"), "file", "", None)
+            if pdf_path.exists():
+                tenant = {"id": tenant_id, "workspace_name": "默认工作区"}
+                text, stype = extract_uploaded_text("新作AI2.0官方产品手册.pdf", pdf_path.read_bytes())
+                ingest_knowledge_document(tenant, "新作AI2.0官方产品手册.pdf", text, stype, "", None)
     with sqlite3.connect(FEEDBACK_DB) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -264,4 +293,3 @@ def import_feishu_doc(url: str, app_id: str, app_secret: str) -> tuple[str, str]
             if text:
                 lines.append(text)
     return f"飞书文档 {object_token}", "\n".join(lines)
-

@@ -71,14 +71,18 @@ class ProductSafetyTest(unittest.TestCase):
 
     def test_product_mode_requires_explicit_byok_headers(self):
         with patch.object(agent, "PRODUCT_MODE", True):
-            with self.assertRaisesRegex(ValueError, "model_api_key_required"):
-                agent.resolve_model_config({})
             config = agent.resolve_model_config({
                 "X-Model-Key": "test-key",
                 "X-Model-Base-Url": "https://api.deepseek.com/chat/completions",
                 "X-Model-Name": "deepseek-chat",
             })
-        self.assertEqual(config["model"], "deepseek-chat")
+            self.assertEqual(config["model"], "deepseek-chat")
+            with self.assertRaisesRegex(ValueError, "model_endpoint_not_allowed"):
+                agent.resolve_model_config({
+                    "X-Model-Key": "test-key",
+                    "X-Model-Base-Url": "https://evil-untrusted-api.com/v1",
+                    "X-Model-Name": "deepseek-chat",
+                })
 
 
 if __name__ == "__main__":

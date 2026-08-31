@@ -15,7 +15,9 @@
     processedMap: {}, hourlySendTimestamps: [], uncertainSendMap: {},
     bridgeUrl: 'http://127.0.0.1:18195', workspaceToken: '', accountId: '', operatorNickname: '',
     knowledgeScope: 'default', modelBaseUrl: '',
-    modelName: '', modelApiKey: '', embeddingBaseUrl: '', embeddingModel: '', embeddingApiKey: '',
+    modelBaseUrl: 'http://127.0.0.1:10100/v1/chat/completions',
+    modelName: 'google-antigravity/gemini-3.7-flash',
+    modelApiKey: '', embeddingBaseUrl: '', embeddingModel: '', embeddingApiKey: '',
     feishuAppId: '', feishuAppSecret: '',
     monitor: { lastLlmAt: 0, lastLlmLatencyMs: 0, llmSuccessCount: 0, llmFailureCount: 0,
       sendSuccessCount: 0, sendFailureCount: 0, readbackFailureCount: 0, lastError: '' }
@@ -415,7 +417,11 @@
         console.warn('[XHS Reply] LLM request failed', error);
         recordMonitor({ lastLlmAt: Date.now(), lastLlmLatencyMs: Date.now() - requestStartedAt,
           llmFailureCount: Number(state.monitor?.llmFailureCount || 0) + 1, lastError: error.message || '请求失败' });
-        if (status !== 401 && status !== 403) addLog('error', `大模型暂时不可用：${error.message || '请求失败'}；同一消息将在 ${Math.ceil(delay / 1000)} 秒后重试`);
+        let friendlyMsg = error.message || '请求失败';
+        if (friendlyMsg === 'model_api_key_required') {
+          friendlyMsg = '未配置大模型 API Key。请打开配置后台填入你的模型 Key 并保存';
+        }
+        if (status !== 401 && status !== 403) addLog('error', `${friendlyMsg}；同一消息将在 ${Math.ceil(delay / 1000)} 秒后重试`);
       }
       return '';
     } finally {
