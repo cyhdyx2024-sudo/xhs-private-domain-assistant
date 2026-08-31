@@ -254,6 +254,10 @@ body {
   background: #fffbeb;
   color: var(--warning);
 }
+.status-pill.error {
+  background: #fef2f2;
+  color: #dc2626;
+}
 
 /* Knowledge Dropzone */
 .dropzone {

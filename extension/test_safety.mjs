@@ -24,6 +24,21 @@ assert.equal(safety.isExcludedContact('平台系统通知', ''), true);
 assert.equal(safety.isExcludedContact('正常客户', '', ['正常客户']), true);
 assert.equal(safety.isExcludedContact('正常客户', '想了解产品'), false);
 
+assert.equal(safety.isHalfTurnTransform('matrix(-1, 0, 0, -1, 0, 0)'), true);
+assert.equal(safety.isHalfTurnTransform('matrix(1, 0, 0, 1, 0, 0)'), false);
+assert.deepEqual(
+  safety.messageBottomState({ scrollTop: 0, scrollHeight: 1317, clientHeight: 296, inverted: true }),
+  { atBottom: true, targetScrollTop: 0 }
+);
+assert.deepEqual(
+  safety.messageBottomState({ scrollTop: 240, scrollHeight: 1317, clientHeight: 296, inverted: true }),
+  { atBottom: false, targetScrollTop: 0 }
+);
+assert.deepEqual(
+  safety.messageBottomState({ scrollTop: 240, scrollHeight: 1317, clientHeight: 296, inverted: false }),
+  { atBottom: false, targetScrollTop: 1317 }
+);
+
 assert.deepEqual(
   safety.normalizeDailyStats({ statsDate: '2026-08-28', repliedCount: 9, leadsCount: 3 }, new Date('2026-08-29T08:00:00+08:00')),
   { statsDate: '2026-08-29', repliedCount: 0, leadsCount: 0 }

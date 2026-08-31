@@ -9,7 +9,7 @@ cp .env.example .env
 python3 agent.py
 ```
 
-默认监听地址以 `agent.py` 中的启动配置为准。生产部署时请启用 `XHS_PRODUCT_MODE=1`，配置允许访问的模型主机，并通过反向代理提供 HTTPS。
+默认监听 `127.0.0.1:18195`，且 `XHS_PRODUCT_MODE=1` 为安全默认。正式使用前请确认 `/healthz` 返回 `product_mode: true`；远程部署还需配置允许访问的模型主机并通过反向代理提供 HTTPS。
 
 ## 工作区令牌恢复
 

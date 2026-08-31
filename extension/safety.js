@@ -59,5 +59,26 @@
     return (blacklist || []).some(item => item && value.includes(String(item).trim()));
   }
 
-  return { HOUR_MS, localDateKey, normalizeDailyStats, retryDelayMs, messageAgeDecision, parseMessageTimestamp, isExcludedContact };
+  function isHalfTurnTransform(transform) {
+    const value = String(transform || '').trim();
+    if (!value || value === 'none') return false;
+    const matrix = value.match(/^matrix\(\s*([-+\d.e]+)\s*,\s*([-+\d.e]+)\s*,\s*([-+\d.e]+)\s*,\s*([-+\d.e]+)/i);
+    if (matrix) return Number(matrix[1]) < -0.9 && Number(matrix[4]) < -0.9;
+    const matrix3d = value.match(/^matrix3d\(([^)]+)\)/i);
+    if (!matrix3d) return false;
+    const values = matrix3d[1].split(',').map(Number);
+    return values.length === 16 && values[0] < -0.9 && values[5] < -0.9;
+  }
+
+  function messageBottomState({ scrollTop = 0, scrollHeight = 0, clientHeight = 0, inverted = false } = {}) {
+    // 小红书消息区目前通过父容器 rotate(180deg) 实现倒序列表：此时 0 才是最新消息。
+    if (inverted) return { atBottom: Math.abs(Number(scrollTop || 0)) <= 8, targetScrollTop: 0 };
+    const remaining = Number(scrollHeight || 0) - Number(scrollTop || 0) - Number(clientHeight || 0);
+    return { atBottom: remaining <= 8, targetScrollTop: Number(scrollHeight || 0) };
+  }
+
+  return {
+    HOUR_MS, localDateKey, normalizeDailyStats, retryDelayMs, messageAgeDecision,
+    parseMessageTimestamp, isExcludedContact, isHalfTurnTransform, messageBottomState
+  };
 });

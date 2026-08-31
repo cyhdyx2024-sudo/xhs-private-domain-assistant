@@ -27,6 +27,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     catch (_) { return { ok: false, error: text.slice(0, 160) || `HTTP ${response.status}` }; }
   }
 
+  async function checkBridgeHealth() {
+    const pill = $('topStatusPill');
+    const label = $('topStatusText');
+    pill.classList.remove('online', 'warning', 'error');
+    label.textContent = '正在检查本机 Bridge…';
+    try {
+      const response = await fetch(`${SERVICE_URL}/healthz`, { cache: 'no-store' });
+      const data = await readJson(response);
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      if (data.product_mode !== true) {
+        pill.classList.add('warning');
+        label.textContent = 'Bridge 为开发模式，不建议正式使用';
+        return false;
+      }
+      pill.classList.add('online');
+      label.textContent = '本机 Bridge 已就绪 · 安全模式';
+      return true;
+    } catch (_) {
+      pill.classList.add('error');
+      label.textContent = '本机 Bridge 未连接';
+      return false;
+    }
+  }
+
   async function registerWorkspace(workspaceName) {
     const response = await fetch(`${SERVICE_URL}/tenant/register`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -755,6 +779,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   $('btnRefreshFeedback').addEventListener('click', loadFeedback);
   $('btnReloadExtension').addEventListener('click', () => chrome.runtime.reload());
+  window.addEventListener('focus', checkBridgeHealth);
 
   populate();
+  checkBridgeHealth();
 });

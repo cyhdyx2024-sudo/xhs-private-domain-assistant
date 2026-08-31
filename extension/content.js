@@ -108,7 +108,12 @@
   function getRightPanelCustomerName() {
     const candidates = Array.from(document.querySelectorAll('.user-nickname'))
       .filter(el => isVisible(el) && cleanText(el.innerText) && cleanText(el.innerText) !== state.operatorNickname)
-      .filter(el => el.getBoundingClientRect().left > window.innerWidth * 0.68);
+      // 页面顶部账号栏也使用 .user-nickname；它代表店铺操作员，不是当前客户。
+      // 只把正文右侧区域的昵称当成交叉校验信号。若该区域没有昵称，data-key 仍是会话真源。
+      .filter(el => {
+        const rect = el.getBoundingClientRect();
+        return rect.top >= 80 && rect.left > window.innerWidth * 0.68;
+      });
     return cleanText(candidates[0]?.innerText);
   }
 
@@ -187,16 +192,31 @@
   }
 
   function getMessageScroller() {
-    return Array.from(document.querySelectorAll('.vue-recycle-scroller'))
+    return Array.from(document.querySelectorAll('.vue-recycle-scroller.recyScroll1'))
       .find(el => isVisible(el) && el.querySelector('.im-msg-item')) || null;
   }
 
+  function isInvertedMessageScroller(scroller) {
+    for (let node = scroller; node && node !== document.body; node = node.parentElement) {
+      if (Safety.isHalfTurnTransform(getComputedStyle(node).transform)) return true;
+    }
+    return false;
+  }
+
   function ensureMessageWindowAtBottom() {
-    // 消息列表同样是虚拟列表：操作员上翻查历史时最新消息不会进入 DOM，会导致上下文断层或漏消息。
+    // 消息列表同样是虚拟列表。小红书当前用 180° 翻转实现倒序滚动，scrollTop=0 才是最新消息；
+    // 普通列表则相反。运行时识别方向，避免把“滚到最新”误写成“滚到最旧”。
     const scroller = getMessageScroller();
     if (!scroller) return false;
-    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 8) return false;
-    scroller.scrollTop = scroller.scrollHeight;
+    const position = Safety.messageBottomState({
+      scrollTop: scroller.scrollTop,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+      inverted: isInvertedMessageScroller(scroller)
+    });
+    if (position.atBottom) return false;
+    scroller.scrollTop = position.targetScrollTop;
+    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
     return true;
   }
 
@@ -805,7 +825,13 @@
       if (!sendResult.confirmed) {
         if (sendResult.clicked) {
           state.uncertainSendMap[history.signature] = Date.now() + 24 * 60 * 60 * 1000;
-          await storageSet({ uncertainSendMap: state.uncertainSendMap });
+          // 已点击发送但回读失败时，真实结果未知。安全上必须把它计入小时上限，
+          // 否则连续回读故障会绕过限额并继续操作其他会话。
+          state.hourlySendTimestamps.push(Date.now());
+          await storageSet({
+            uncertainSendMap: state.uncertainSendMap,
+            hourlySendTimestamps: state.hourlySendTimestamps
+          });
           recordMonitor({ readbackFailureCount: Number(state.monitor?.readbackFailureCount || 0) + 1,
             lastError: `${session.name} 发送结果未回读` });
           addLog('error', `已点击发送但未回读到消息，已暂停该会话自动重试：${session.name}`);
