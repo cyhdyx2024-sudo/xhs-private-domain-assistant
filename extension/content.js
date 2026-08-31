@@ -206,6 +206,8 @@
   }
 
   function ensureMessageWindowAtBottom() {
+    // 人工介入保护：如果用户在最近 10 秒内有滚动/鼠标/键盘操作，绝不强行篡改用户的滚动位置
+    if (Date.now() - lastUserActivityAt < 10_000) return false;
     // 消息列表同样是虚拟列表。小红书当前用 180° 翻转实现倒序滚动，scrollTop=0 才是最新消息；
     // 普通列表则相反。运行时识别方向，避免把“滚到最新”误写成“滚到最旧”。
     const scroller = getMessageScroller();
@@ -364,7 +366,6 @@
       }
       const data = await response.json();
       lastComplianceFlags = Array.isArray(data.compliance_flags) ? data.compliance_flags : [];
-      if (ensureMessageWindowAtBottom()) await sleep(260);
       const active = getActiveSession();
       const activeHistory = active ? parseConversationHistory(active) : null;
       if (serial !== requestSerial || !active || active.id !== session.id || activeHistory?.signature !== history.signature) {
@@ -572,12 +573,14 @@
     if (destroyed || !state.enabled || state.runMode !== 'copilot') return;
     const session = getActiveSession();
     if (!session?.stable) return;
+    const isSwitching = session.id !== currentSessionId;
     if (session.id !== currentSessionId) {
       releasePreviousPluginDraft(session.id);
       currentSessionId = session.id;
       updateSessionLabel(session);
     }
-    if (ensureMessageWindowAtBottom()) await sleep(260);
+    // 只有在主动点击按钮(force)或者刚切换会话时才尝试归位，日常轮询不抢夺用户滚动条
+    if ((force || isSwitching) && ensureMessageWindowAtBottom()) await sleep(260);
     const history = parseConversationHistory(session);
     const savedManualDraft = manualDraftCache.get(session.id);
     if (savedManualDraft) {
