@@ -453,6 +453,30 @@ def register_tenant(workspace_name: str) -> dict:
     return {"tenant_id": tenant_id, "access_token": access_token}
 
 
+def rotate_tenant_token(identifier: str) -> dict:
+    """由服务器所有者在本机终端重签令牌，不暴露远程恢复接口。"""
+    value = clean_analysis_text(identifier, 120)
+    if not value:
+        raise ValueError("workspace_identifier_required")
+    init_feedback_db()
+    with sqlite3.connect(FEEDBACK_DB) as conn:
+        rows = conn.execute(
+            "SELECT id, workspace_name FROM tenants WHERE id = ? OR workspace_name = ? ORDER BY created_at DESC",
+            (value, value),
+        ).fetchall()
+        if not rows:
+            raise ValueError("workspace_not_found")
+        if len(rows) > 1:
+            raise ValueError("workspace_name_ambiguous_use_tenant_id")
+        tenant_id, workspace_name = rows[0]
+        access_token = f"xhs_live_{secrets.token_urlsafe(32)}"
+        conn.execute(
+            "UPDATE tenants SET token_hash = ?, updated_at = ? WHERE id = ?",
+            (token_hash(access_token), datetime.now(timezone.utc).isoformat(), tenant_id),
+        )
+    return {"tenant_id": tenant_id, "workspace_name": workspace_name, "access_token": access_token}
+
+
 def get_tenant_by_token(access_token: str) -> dict | None:
     if not access_token:
         return None

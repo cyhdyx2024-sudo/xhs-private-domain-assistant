@@ -46,7 +46,7 @@ Customer Service Webpage (Browser DOM)
 
 ### 1. Run the LLM Bridge (self-hosted by default)
 
-The extension connects to `http://127.0.0.1:18195` out of the box. Start the bridge locally with zero dependencies:
+Version 1.1.0 connects only to the local Bridge at `http://127.0.0.1:18195`, avoiding broad remote-site permissions. Start it locally with zero dependencies:
 
 ```bash
 cd server
@@ -58,7 +58,7 @@ For team deployments, host the bridge on your own server behind an HTTPS reverse
 
 ### 2. Install Chrome Extension
 
-1. Download the latest `xhs-private-domain-assistant-v1.1.0.zip` from [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases), or use the `extension/` folder from this repo directly.
+1. Download the latest `xhs-copilot-extension-v1.1.0.zip` from [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases), or use the `extension/` folder from this repo directly.
 2. Unzip the downloaded file.
 3. Open Chrome and navigate to `chrome://extensions/`, enable **Developer mode** in the top-right corner.
 4. Click **Load unpacked** and select the `extension` folder.

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "小红书私信智能自动回复助手 (XHS Auto-Reply Pro)",
+  "name": "小红书私信智能副驾 (XHS Copilot Pro)",
   "version": "1.1.0",
-  "description": "适配专业号客服工作台的上下文私信副驾、多模型支持、专业知识库Studio、夜间值守与线索捕获助手",
+  "description": "适配专业号客服工作台的上下文私信副驾，支持多模型、业务知识库、人工确认与线索捕获",
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
@@ -22,8 +22,7 @@
     }
   },
   "permissions": [
-    "storage",
-    "activeTab"
+    "storage"
   ],
   "host_permissions": [
     "*://creator.xiaohongshu.com/*",
@@ -34,16 +33,7 @@
     "*://www.xiaohongshu.com/*",
     "*://edith.xiaohongshu.com/*",
     "http://127.0.0.1/*",
-    "http://localhost/*",
-    "https://api.openai.com/*",
-    "https://api.deepseek.com/*",
-    "https://dashscope.aliyuncs.com/*",
-    "https://open.bigmodel.cn/*",
-    "https://api.moonshot.cn/*",
-    "https://api.siliconflow.cn/*",
-    "https://ark.cn-beijing.volces.com/*",
-    "https://api.minimax.chat/*",
-    "https://openrouter.ai/*"
+    "http://localhost/*"
   ],
   "content_scripts": [
     {

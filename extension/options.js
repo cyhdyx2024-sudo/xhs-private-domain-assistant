@@ -104,6 +104,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('embeddingApiKey').value = config.embeddingApiKey || '';
 
     $('workspaceName').value = config.workspaceName || '';
+    $('workspaceToken').value = config.workspaceToken || '';
     $('accountId').value = config.accountId || '';
     $('businessLine').value = config.knowledgeScope || 'default';
     $('brandName').value = config.brandName || '';
@@ -152,10 +153,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!modelName) throw new Error('请填写模型名称');
       }
 
-      let token = config.workspaceToken || '';
+      let token = $('workspaceToken').value.trim() || config.workspaceToken || '';
       const wsName = $('workspaceName').value.trim() || 'My_Workspace';
 
-      // 1. Save Business Config to Cloud. A stale token is replaced once, then retried.
+      // 1. 保存业务配置。已有工作区凭据失效时必须显式停下，不能静默创建新租户，
+      // 否则旧知识库、反馈案例和线索会在界面上像“消失”了一样。
       const businessPayload = {
         workspace_name: wsName,
         account_id: $('accountId').value.trim(),
@@ -166,16 +168,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       };
 
       if (!token) token = await registerWorkspace(wsName);
-      let saved = await saveTenantConfig(token, businessPayload);
+      const saved = await saveTenantConfig(token, businessPayload);
       if (saved.response.status === 401 || saved.response.status === 403 || saved.data.error === 'workspace_token_invalid') {
-        token = await registerWorkspace(wsName);
-        saved = await saveTenantConfig(token, businessPayload);
+        throw new Error('工作区凭据已失效。为保护旧知识库和线索，系统没有自动新建工作区；请先恢复原工作区凭据，或清除本地配置后明确创建新工作区');
       }
       if (!saved.response.ok || !saved.data.ok) throw new Error(saved.data.error || `业务配置保存失败（HTTP ${saved.response.status}）`);
 
       // 3. Save Local Config
       const newConfig = {
-        configVersion: '1.0.2',
+        configVersion: '1.1.0',
         onboardingComplete: true,
         enabled: $('masterToggle').value === 'true',
         runMode: $('runMode').value,

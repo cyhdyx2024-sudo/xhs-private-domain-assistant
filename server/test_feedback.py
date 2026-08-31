@@ -3,12 +3,13 @@ import unittest
 from pathlib import Path
 
 import agent
+import db
 
 
 class FeedbackKnowledgeBaseTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        agent.FEEDBACK_DB = Path(self.temp_dir.name) / "feedback.sqlite3"
+        db.FEEDBACK_DB = Path(self.temp_dir.name) / "feedback.sqlite3"
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -31,6 +32,12 @@ class FeedbackKnowledgeBaseTest(unittest.TestCase):
         self.assertTrue(matches)
         self.assertNotIn("13800138000", matches[0]["latest_msg"])
         self.assertIn("[手机号]", matches[0]["latest_msg"])
+
+    def test_rotate_tenant_token_invalidates_previous_token(self) -> None:
+        created = agent.register_tenant("restore-test")
+        rotated = agent.rotate_tenant_token(created["tenant_id"])
+        self.assertIsNone(agent.get_tenant_by_token(created["access_token"]))
+        self.assertEqual(agent.get_tenant_by_token(rotated["access_token"])["id"], created["tenant_id"])
 
 
 if __name__ == "__main__":

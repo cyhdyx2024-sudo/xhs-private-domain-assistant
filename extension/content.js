@@ -43,6 +43,7 @@
   let lastComplianceFlags = [];
 
   const draftCache = new Map();
+  const manualDraftCache = new Map();
   const inFlightSignatures = new Set();
   const messageRetryUntil = new Map();
   const contactRetryUntil = new Map();
@@ -163,6 +164,19 @@
     return Safety.parseMessageTimestamp(text);
   }
 
+  function extractMessageTimestamp(item, bubble) {
+    // 只信专用时间节点，绝不能从消息正文中找“14:00”之类文本。
+    const candidates = item.querySelectorAll('.time, .msg-time, .message-time, [class*="time"], [class*="date"]');
+    for (const node of candidates) {
+      if (bubble.contains(node) || node.children.length > 0) continue;
+      const text = cleanText(node.innerText || node.textContent);
+      if (!text || text.length > 32) continue;
+      const timestamp = parseTimestamp(text);
+      if (timestamp) return timestamp;
+    }
+    return 0;
+  }
+
   function emptyHistory(session) {
     return {
       sessionId: session?.id || '', contactName: session?.name || '', turns: [], userMessages: [],
@@ -213,7 +227,7 @@
             : 'user',
           content,
           type: bubble.classList.contains('card_container') ? 'card' : 'text',
-          timestamp: parseTimestamp(cleanText(item.innerText || item.textContent)),
+          timestamp: extractMessageTimestamp(item, bubble),
           domIndex
         };
       }).filter(Boolean);
@@ -286,14 +300,14 @@
 
   async function suspendForAuthFailure() {
     state.enabled = false;
-    state.onboardingComplete = false;
     state.fullAutoArmedAt = 0;
     state.operatorAway = false;
-    state.workspaceToken = '';
     globalCircuitUntil = Infinity;
-    await storageSet({ enabled: false, onboardingComplete: false, fullAutoArmedAt: 0, operatorAway: false, workspaceToken: '' });
+    // 保留失效令牌和原工作区身份，让设置页能明确报错并走恢复流程；
+    // 清空令牌会让下次保存静默注册一个空工作区，造成旧数据“消失”。
+    await storageSet({ enabled: false, fullAutoArmedAt: 0, operatorAway: false });
     syncDockFromState();
-    addLog('error', '工作区凭据已失效，系统已停机。请打开完整管理控制台重新保存配置');
+    addLog('error', '工作区凭据已失效，系统已停机并保留原工作区信息。请先恢复凭据，勿直接新建工作区');
   }
 
   async function fetchLLMReply(history, session, action) {
@@ -327,10 +341,10 @@
         throw requestError;
       }
       const data = await response.json();
-    lastComplianceFlags = Array.isArray(data.compliance_flags) ? data.compliance_flags : [];
-    if (ensureMessageWindowAtBottom()) await sleep(260);
-    const active = getActiveSession();
-    const activeHistory = active ? parseConversationHistory(active) : null;
+      lastComplianceFlags = Array.isArray(data.compliance_flags) ? data.compliance_flags : [];
+      if (ensureMessageWindowAtBottom()) await sleep(260);
+      const active = getActiveSession();
+      const activeHistory = active ? parseConversationHistory(active) : null;
       if (serial !== requestSerial || !active || active.id !== session.id || activeHistory?.signature !== history.signature) {
         addLog('info', `会话已切换，丢弃 [${session.name}] 的过期结果`);
         return '';
@@ -413,9 +427,20 @@
 
   function releasePreviousPluginDraft(nextSessionId) {
     if (!currentDraftSessionId || currentDraftSessionId === nextSessionId) return;
+    const previousSessionId = currentDraftSessionId;
     const textarea = getReplyTextarea();
-    const cached = draftCache.get(currentDraftSessionId);
-    if (textarea && cached && cleanText(textarea.value) === cleanText(cached.reply)) safeSetNativeValue(textarea, '');
+    const cached = draftCache.get(previousSessionId);
+    const currentText = cleanText(textarea?.value);
+    if (currentText) {
+      manualDraftCache.set(previousSessionId, {
+        text: textarea.value,
+        signature: cached?.signature || ''
+      });
+      const candidate = feedbackCandidates.get(previousSessionId);
+      if (candidate) candidate.humanReply = textarea.value;
+    }
+    // 点击切换发生在捕获阶段，此时输入框仍属于旧会话；必须无条件清空，避免旧草稿落到新客户。
+    if (textarea && textarea.value) safeSetNativeValue(textarea, '');
     currentDraftSessionId = '';
   }
 
@@ -465,6 +490,7 @@
     const cached = session ? draftCache.get(session.id) : null;
     const humanReply = cleanText(getReplyTextarea()?.value);
     if (!session || !cached || !humanReply) return;
+    manualDraftCache.delete(session.id);
     const history = parseConversationHistory(session);
     feedbackCandidate = {
       session: { id: session.id, name: session.name },
@@ -527,6 +553,16 @@
     }
     if (ensureMessageWindowAtBottom()) await sleep(260);
     const history = parseConversationHistory(session);
+    const savedManualDraft = manualDraftCache.get(session.id);
+    if (savedManualDraft) {
+      if (savedManualDraft.signature === history.signature && !cleanText(getReplyTextarea()?.value)) {
+        safeSetNativeValue(getReplyTextarea(), savedManualDraft.text);
+        currentDraftSessionId = session.id;
+        updateRuntimeStatus('copilot', '已恢复该客户未发送的人工草稿');
+        return;
+      }
+      if (savedManualDraft.signature !== history.signature) manualDraftCache.delete(session.id);
+    }
     if (!force && Number(messageRetryUntil.get(history.signature) || 0) > Date.now()) return;
     const cached = draftCache.get(session.id);
     if (!force && !history.needsReply) {
@@ -569,6 +605,17 @@
     const cutoff = Date.now() - 60 * 60 * 1000;
     state.hourlySendTimestamps = (state.hourlySendTimestamps || []).filter(ts => Number(ts) >= cutoff);
     return state.hourlySendTimestamps.length < Number(state.maxRepliesPerHour || 12);
+  }
+
+  function acquireSendLease(signature) {
+    return chrome.runtime.sendMessage({ type: 'ACQUIRE_SEND_LEASE', key: signature, ttlMs: 90_000 })
+      .then(result => Boolean(result?.acquired))
+      .catch(() => false);
+  }
+
+  function releaseSendLease(signature) {
+    if (!signature) return Promise.resolve();
+    return chrome.runtime.sendMessage({ type: 'RELEASE_SEND_LEASE', key: signature }).catch(() => {});
   }
 
   function isExternalActionStatusCheck(value) {
@@ -701,6 +748,7 @@
     const operationStartedAt = Date.now();
     const originalSessionId = getActiveSession()?.id || '';
     const targetId = pending.id;
+    let sendLeaseKey = '';
     try {
       if (!targetId) return;
       if (getActiveSession()?.id !== targetId) pending.card.click();
@@ -720,6 +768,12 @@
       if (retryAt > Date.now()) return;
       if (hasProcessedSignature(history.signature)) {
         messageRetryUntil.set(history.signature, Date.now() + Number(state.cooldownMinutes || 30) * 60_000);
+        return;
+      }
+      sendLeaseKey = history.signature;
+      if (!await acquireSendLease(sendLeaseKey)) {
+        messageRetryUntil.set(history.signature, Date.now() + 30_000);
+        addLog('info', `[${session.name}] 正由另一个标签页处理，本页已跳过`);
         return;
       }
       const age = Safety.messageAgeDecision(history.latestUserTurn?.timestamp, Date.now(), Number(state.autoReplyMaxAgeMinutes || 120) * 60_000);
@@ -772,6 +826,7 @@
       await storageSet({ processedMap: state.processedMap, hourlySendTimestamps: state.hourlySendTimestamps, repliedCount: state.repliedCount, statsDate: state.statsDate });
       addLog('success', `已自动回复 [${session.name}]；会话签名已锁定防重复`);
     } finally {
+      await releaseSendLease(sendLeaseKey);
       await restoreSession(originalSessionId, operationStartedAt);
       autoProcessing = false;
       advanceVirtualContactWindow();
@@ -1158,7 +1213,7 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    ['enabled', 'onboardingComplete', 'runMode', 'timeScope', 'fullAutoArmedAt', 'operatorAway', 'repliedCount', 'leadsCount', 'statsDate', 'bridgeUrl', 'workspaceToken', 'accountId', 'knowledgeScope', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl', 'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'monitor', 'uncertainSendMap', 'autoReplyMaxAgeMinutes', 'contactBlacklist'].forEach(key => {
+    ['enabled', 'onboardingComplete', 'runMode', 'timeScope', 'fullAutoArmedAt', 'operatorAway', 'repliedCount', 'leadsCount', 'statsDate', 'bridgeUrl', 'workspaceToken', 'accountId', 'knowledgeScope', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl', 'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'monitor', 'processedMap', 'hourlySendTimestamps', 'uncertainSendMap', 'autoReplyMaxAgeMinutes', 'contactBlacklist'].forEach(key => {
       if (changes[key]) state[key] = changes[key].newValue;
     });
     if (changes.workspaceToken?.newValue) globalCircuitUntil = 0;

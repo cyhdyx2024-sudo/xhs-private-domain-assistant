@@ -607,12 +607,18 @@ class HttpHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    threading.Thread(target=alert_worker, daemon=True).start()
     parser = argparse.ArgumentParser(description="私域接待 Agent HTTP 服务")
     parser.add_argument("--port", type=int, default=18195)
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--rotate-token", metavar="WORKSPACE", help="按 tenant ID 或工作区名称在本机重签访问令牌")
     args = parser.parse_args()
+    if args.rotate_token:
+        result = rotate_tenant_token(args.rotate_token)
+        print(f"workspace: {result['workspace_name']} ({result['tenant_id']})")
+        print(f"new access token: {result['access_token']}")
+        return
 
+    threading.Thread(target=alert_worker, daemon=True).start()
     server = ThreadingHTTPServer((args.host, args.port), HttpHandler)
     init_feedback_db()
     print(f"✅ 私域接待 LLM 网关已启动: http://{args.host}:{args.port}")

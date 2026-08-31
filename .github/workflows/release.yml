@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify tag matches manifest
+        run: |
+          VERSION="$(python3 -c 'import json; print(json.load(open("extension/manifest.json"))["version"])')"
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+      - name: Test
+        run: |
+          node extension/test_background.mjs
+          node extension/test_release.mjs
+          node extension/test_safety.mjs
+          python3 -m unittest discover -v -s server
+      - name: Package
+        run: python3 scripts/package_release.py
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "XHS Copilot $GITHUB_REF_NAME"

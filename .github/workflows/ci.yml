@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Extension checks
+        run: |
+          node --check extension/background.js
+          node --check extension/content.js
+          node --check extension/options.js
+          node extension/test_background.mjs
+          node extension/test_release.mjs
+          node extension/test_safety.mjs
+      - name: Bridge tests
+        run: python3 -m unittest discover -v -s server
+      - name: Build release archives
+        run: python3 scripts/package_release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xhs-copilot-release
+          path: dist/

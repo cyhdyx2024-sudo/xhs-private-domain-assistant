@@ -1,6 +1,6 @@
 # 小红书私信智能副驾 (XHS Copilot Pro)
 
-面向小红书专业号客服工作台的开源 **AI 私信副驾**：Chrome 扩展 + 可完全自托管的 Python LLM Bridge。当前版本 V1.0.2。
+面向小红书专业号客服工作台的开源 **AI 私信副驾**：Chrome 扩展 + 可完全自托管的 Python LLM Bridge。当前版本 V1.1.0。
 
 > **⚖️ 重要声明 / Legal Disclaimer**
 > 1. 本项目为独立个人维护的第三方开源效率工具，**非小红书官方产品**，与小红书（行吟信息科技/小红书科技有限公司）无任何商业合作、从属或背书关系。
@@ -38,7 +38,7 @@
 - **`extension/`**：Chrome Manifest V3 扩展，提供页面内悬浮控制台与 Studio 管理后台。
 - **`server/`**：零依赖 Python 网关（仅标准库），处理工作区隔离、文档分段与混合检索、人工案例自学习、回复安全校验与模型转发。**默认只监听本机 `127.0.0.1:18195`，数据不出你的机器。**
 
-扩展默认连接 `http://127.0.0.1:18195`。如需团队共享网关，可在自建服务器上部署 Bridge（建议置于 HTTPS 反向代理之后），并在扩展设置中修改服务地址。
+扩展 V1.1.0 固定连接本机 `http://127.0.0.1:18195`，避免申请宽泛的远程站点权限。团队共享远程网关尚未作为正式能力发布。
 
 ## 🚀 快速上手
 
@@ -52,7 +52,7 @@ python3 agent.py       # 默认监听 http://127.0.0.1:18195
 
 ### 2. 安装 Chrome 扩展
 
-1. 从 [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases) 下载 `xhs-private-domain-assistant-v1.1.0.zip` 并解压（或直接使用仓库 `extension/` 目录）。
+1. 从 [Releases](https://github.com/cyhdyx2024-sudo/xhs-private-domain-assistant/releases) 下载 `xhs-copilot-extension-v1.1.0.zip` 并解压（或直接使用仓库 `extension/` 目录）。
 2. Chrome 打开 `chrome://extensions/`，开启右上角**开发者模式**。
 3. 点击**加载已解压的扩展程序**，选择解压出的 `extension` 文件夹。
 4. 打开扩展配置面板（Studio），按向导填写：工作区名称 → 模型服务商与 API Key → 店铺资料 → 回复偏好。
@@ -61,11 +61,14 @@ python3 agent.py       # 默认监听 http://127.0.0.1:18195
 ## 🧪 质量与测试
 
 ```bash
-# 扩展安全规则与契约测试
-cd extension && node test_release.mjs && node test_safety.mjs
+# 扩展安全规则、跨标签页租约与契约测试
+cd extension && node test_background.mjs && node test_release.mjs && node test_safety.mjs
 
 # 服务端单元测试
 cd ../server && python3 -m unittest discover -v
+
+# 生成扩展包、Bridge 包与 SHA-256
+cd .. && python3 scripts/package_release.py
 ```
 
 ## ⚠️ 使用边界
@@ -77,4 +80,4 @@ cd ../server && python3 -m unittest discover -v
 
 ## 📄 开源许可证
 
-本项目基于 [MIT License](LICENSE) 开源。English documentation: [README_EN.md](README_EN.md)。
+本项目基于 [MIT License](LICENSE) 开源。使用前请阅读 [隐私说明](PRIVACY.md) 与 [安全报告流程](SECURITY.md)。English documentation: [README_EN.md](README_EN.md)。

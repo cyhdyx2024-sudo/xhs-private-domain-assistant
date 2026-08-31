@@ -40,7 +40,7 @@ class EndpointRegressionTest(unittest.TestCase):
         cls.thread.start()
         status, body = _request(cls.base, "/tenant/register", payload={"workspace_name": "e2e-test-ws"})
         assert status == 201, body
-        cls.token = json.loads(body)["token"]
+        cls.token = json.loads(body)["access_token"]
 
     @classmethod
     def tearDownClass(cls):
