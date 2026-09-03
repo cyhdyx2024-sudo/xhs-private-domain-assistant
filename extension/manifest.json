@@ -52,6 +52,7 @@
       ],
       "js": [
         "safety.js",
+        "dock.js",
         "content.js",
         "comment-copilot.js"
       ],

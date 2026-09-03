@@ -925,34 +925,12 @@
   }
 
   function updateTokenMeterUI() {
-    const usageText = document.getElementById("xhsTokenUsageText");
-    const bar = document.getElementById("xhsTokenProgressBar");
-    const countText = document.getElementById("xhsCallCountText");
-    const badge = document.getElementById("xhsTokenStatusBadge");
-    if (!usageText || !bar) return;
-
-    const used = Number(state.todayTokens || 0);
-    const budget = Number(state.dailyTokenBudget || 200_000);
-    const calls = Number(state.todayCalls || 0);
-    const pct = Math.min(100, Math.round((used / budget) * 100));
-
-    usageText.textContent = (used / 1000).toFixed(1) + "k / " + (budget / 1000).toFixed(0) + "k (" + pct + "%)";
-    bar.style.width = pct + "%";
-
-    if (state.circuitTripped) {
-      bar.style.background = "#ef4444";
-      if (badge) { badge.textContent = "已熔断"; badge.style.color = "#ef4444"; }
-      usageText.style.color = "#ef4444";
-    } else if (pct >= 80) {
-      bar.style.background = "linear-gradient(90deg, #f59e0b, #ef4444)";
-      if (badge) { badge.textContent = "预警"; badge.style.color = "#f59e0b"; }
-      usageText.style.color = "#f59e0b";
-    } else {
-      bar.style.background = "linear-gradient(90deg, #38bdf8, #818cf8)";
-      if (badge) { badge.textContent = "运行中"; badge.style.color = "#10b981"; }
-      usageText.style.color = "#38bdf8";
-    }
-    if (countText) countText.textContent = "今日调用: " + calls + " 次";
+    window.XhsDock?.updateTokenMeter({
+      used: state.todayTokens,
+      budget: state.dailyTokenBudget,
+      calls: state.todayCalls,
+      tripped: state.circuitTripped
+    });
   }
 
   async function fetchLLMReply(history, session, action) {
@@ -1139,20 +1117,12 @@
   }
 
   function showFeedbackCard(candidate, sent = false) {
-    const card = document.getElementById('xhsFeedbackCard');
-    const hint = document.getElementById('xhsFeedbackHint');
-    if (!card || state.runMode !== 'copilot' || !candidate) return;
-    card.hidden = false;
-    if (hint) hint.textContent = sent
-      ? `已捕获发给「${candidate.session.name}」的人工版本，可评价后写入知识库。`
-      : `可直接修改输入框中的话术，再把更好的版本反哺给机器人。`;
+    if (state.runMode !== 'copilot' || !candidate) return;
+    window.XhsDock?.showFeedbackCard(candidate, sent);
   }
 
   function hideFeedbackCard() {
-    const card = document.getElementById('xhsFeedbackCard');
-    if (card) card.hidden = true;
-    const status = document.getElementById('xhsFeedbackStatus');
-    if (status) status.textContent = '';
+    window.XhsDock?.hideFeedbackCard();
   }
 
   function captureFeedbackCandidate() {
@@ -1731,163 +1701,46 @@
   }
 
   function addLog(type, text) {
-    const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    state.logs.unshift({ type, text: cleanText(text), time });
-    state.logs = state.logs.slice(0, 40);
-    const box = document.getElementById('xhsLogContainer');
-    if (!box) return;
-    box.replaceChildren(...state.logs.map(log => {
-      const row = document.createElement('div'); row.className = `xhs-log-item ${log.type}`;
-      const clock = document.createElement('div'); clock.className = 'xhs-log-time'; clock.textContent = log.time;
-      const message = document.createElement('div'); message.className = 'xhs-log-text'; message.textContent = log.text;
-      row.append(clock, message); return row;
-    }));
+    window.XhsDock?.addLog(type, text);
   }
 
-  async function saveConfig(patch, { arm = false } = {}) {
-    state = { ...state, ...patch };
-    if (state.runMode !== 'full_auto' || !state.enabled || !arm) {
-      state.fullAutoArmedAt = 0;
-      state.operatorAway = false;
-    } else {
-      state.fullAutoArmedAt = Date.now();
-      state.operatorAway = true;
-    }
-    await storageSet({ enabled: state.enabled, runMode: state.runMode, timeScope: state.timeScope, fullAutoArmedAt: state.fullAutoArmedAt, operatorAway: state.operatorAway });
-    if (!isFullAutoArmed()) autoProcessing = false;
-    abortPendingRequest('config_changed');
-    syncDockFromState();
-    if (state.enabled && state.runMode === 'copilot') scheduleSense(80);
+  function updateSessionLabel(session) {
+    window.XhsDock?.updateSessionLabel(session);
+  }
+
+  function updateRuntimeStatus(mode, detail) {
+    window.XhsDock?.updateRuntimeStatus(mode, detail);
+  }
+
+  function syncMonitorUI() {
+    window.XhsDock?.syncMonitorUI(state.monitor);
   }
 
   function syncDockFromState() {
-    const master = document.getElementById('xhsDockMasterToggle');
-    const mode = document.getElementById('xhsDockRunMode');
-    const time = document.getElementById('xhsDockTimeScope');
-    if (master) master.checked = Boolean(state.enabled);
-    if (mode) mode.value = state.runMode;
-    if (time) time.value = state.timeScope;
+    window.XhsDock?.syncState(state);
     const armed = isFullAutoArmed();
-    const hint = document.getElementById('xhsAutoArmHint');
-    if (hint) hint.textContent = state.runMode === 'full_auto'
-      ? (armed ? '已武装：无人操作时自动回复' : '未武装：请点击“开始无人值守”')
-      : '副驾只预填草稿，不会自动发送';
-    const awayButton = document.getElementById('xhsBeginAwayMode');
-    if (awayButton) {
-      awayButton.hidden = state.runMode !== 'full_auto';
-      awayButton.textContent = armed ? '结束无人值守' : '开始无人值守';
-    }
-    const button = document.getElementById('xhsBtnGenNow');
-    if (button) button.textContent = state.runMode === 'full_auto' ? '立即扫描待回复会话' : '为当前会话生成专属草稿';
     updateRuntimeStatus(state.runMode, state.runMode === 'full_auto' ? (armed ? '监听新进线中' : '等待武装') : '等待客户新消息');
     syncMonitorUI();
+    updateTokenMeterUI();
   }
 
   function renderFloatingDock() {
-    const root = document.createElement('div');
-    root.id = 'xhs-reply-dock-root';
-    root.innerHTML = `
-      <div class="xhs-dock-pill" id="xhsPillTrigger" title="点击展开私信智能控制台">
-        <div class="xhs-dock-status-dot" id="xhsPulseDot"></div><span style="font-weight:700;font-size:12px;">私信顾问</span>
-        <span style="font-size:11px;color:#cbd5e1;" id="xhsPillModeText">加载中</span>
-      </div>
-      <div class="xhs-dock-panel" id="xhsExpandedPanel">
-        <div class="xhs-dock-header"><div class="xhs-dock-title">私信智能控制台 <span class="badge">V1.1</span></div>
-          <button class="xhs-dock-btn-icon" id="xhsClosePanelBtn" aria-label="关闭">✕</button></div>
-        <div class="xhs-dock-tabs"><div class="xhs-dock-tab active" data-tab="quick">快捷操作</div><div class="xhs-dock-tab" data-tab="settings">开关与设置</div><div class="xhs-dock-tab" data-tab="knowledge">案例库</div></div>
-        <div class="xhs-dock-body" id="xhsTabQuick">
-          <button class="xhs-btn xhs-btn-primary" style="width:100%;padding:9px;" id="xhsBtnGenNow">生成专属草稿</button>
-          <div style="display:flex;gap:6px;margin:8px 0 0 0;">
-            <button class="xhs-btn xhs-btn-secondary" style="flex:1;padding:6px 4px;font-size:11px;" id="xhsBtnLearnNow" title="一键从当前已聊会话中学习并提炼我的专属话术风格">🧠 一键学习话术</button>
-            <button class="xhs-btn xhs-btn-secondary" style="flex:1;padding:6px 4px;font-size:11px;" id="xhsBtnSendWecomCard" title="一键向当前客户发送企业微信名片">📇 发送企微名片</button>
-            <button class="xhs-btn xhs-btn-secondary" style="flex:1;padding:6px 4px;font-size:11px;" id="xhsBtnSendLeadCard" title="一键向当前客户发送官方留资表单卡">📋 发送留资卡</button>
-          </div>
-          <div style="font-size:11px;color:#64748b;margin:8px 0;" id="xhsAutoArmHint"></div>
-          <div class="xhs-feedback-card" id="xhsFeedbackCard" hidden>
-            <div class="xhs-feedback-title"><span>人工校准</span><span class="xhs-feedback-kb">持续学习</span></div>
-            <div class="xhs-feedback-hint" id="xhsFeedbackHint">修改输入框中的话术后，将更好的版本反哺给机器人。</div>
-            <textarea class="xhs-textarea" id="xhsFeedbackReason" placeholder="为什么这样回更好？可不填，AI 会自动分析"></textarea>
-            <button class="xhs-btn xhs-btn-secondary" style="width:100%;" id="xhsBtnSaveFeedback">记住当前人工话术</button>
-            <div class="xhs-feedback-status" id="xhsFeedbackStatus"></div>
-          </div>
-          <div class="xhs-token-meter" style="margin:8px 0 10px;padding:8px 10px;background:rgba(15,23,42,0.6);border-radius:8px;border:1px solid rgba(148,163,184,0.15);">
-            <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;margin-bottom:5px;">
-              <span style="font-weight:600;color:#94a3b8;display:flex;align-items:center;gap:4px;"><span>🛡️</span> <span>Token 熔断保护</span></span>
-              <span id="xhsTokenUsageText" style="color:#38bdf8;font-family:monospace;font-weight:700;">0 / 200k (0%)</span>
-            </div>
-            <div style="height:6px;background:#1e293b;border-radius:3px;overflow:hidden;position:relative;">
-              <div id="xhsTokenProgressBar" style="width:0%;height:100%;background:linear-gradient(90deg, #38bdf8, #818cf8);border-radius:3px;transition:width 0.3s ease;"></div>
-            </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#64748b;margin-top:5px;">
-              <span id="xhsCallCountText">今日调用: 0 次</span>
-              <div style="display:flex;align-items:center;gap:6px;">
-                <span id="xhsTokenStatusBadge" style="color:#10b981;font-weight:600;">运行中</span>
-                <button id="xhsBtnResetTokens" style="background:transparent;border:none;color:#64748b;cursor:pointer;padding:0;text-decoration:underline;font-size:10px;" title="重置今日计数与熔断状态">重置</button>
-              </div>
-            </div>
-          </div>
-          <div style="font-size:11px;font-weight:600;color:#64748b;margin:10px 0 6px;display:flex;justify-content:space-between;gap:8px;">
-            <span>执行轨迹</span><span id="xhsActiveCustomerName" style="color:#ff2442;text-align:right;">当前客户：识别中</span></div>
-          <div class="xhs-log-list" id="xhsLogContainer"><div style="color:#94a3b8;font-size:11px;text-align:center;padding:10px;">等待会话变化</div></div>
-        </div>
-        <div class="xhs-dock-body" id="xhsTabSettings" style="display:none;">
-          <div class="xhs-status-card"><div><div style="font-weight:600;">总开关</div><div style="font-size:11px;color:#64748b;">关闭后不读取也不生成</div></div>
-            <label class="xhs-toggle-switch"><input type="checkbox" id="xhsDockMasterToggle"><span class="xhs-toggle-slider"></span></label></div>
-          <div class="xhs-field-group"><label class="xhs-field-label">工作模式</label><select class="xhs-input-text" id="xhsDockRunMode">
-            <option value="copilot">半自动副驾（只预填）</option><option value="full_auto">全自动秒回（自动发送）</option></select></div>
-          <div class="xhs-field-group"><label class="xhs-field-label">生效时段</label><select class="xhs-input-text" id="xhsDockTimeScope">
-            <option value="all_day">全天运行</option><option value="night_only">仅夜间 22:00–09:00</option></select></div>
-          <button class="xhs-btn xhs-btn-primary" style="width:100%;margin-bottom:10px;" id="xhsBeginAwayMode" hidden>开始无人值守</button>
-          <div class="xhs-field-group"><label class="xhs-field-label">运行监控</label><div class="xhs-monitor-summary" id="xhsMonitorSummary">等待数据</div></div>
-          <div style="font-size:11px;color:#64748b;line-height:1.6;">全自动会在人工操作页面时暂停；同一条客户消息 30 分钟内不会重复发送，每小时最多 ${state.maxRepliesPerHour} 条。</div>
-        </div>
-        <div class="xhs-dock-body" id="xhsTabKnowledge" style="display:none;">
-          <label class="xhs-knowledge-drop" id="xhsKnowledgeDrop">拖入或选择 PDF / Word / PPT / TXT / Markdown<input id="xhsKnowledgeFiles" type="file" accept=".pdf,.docx,.pptx,.txt,.md,.csv" multiple hidden></label>
-          <div class="xhs-feishu-row"><input class="xhs-input-text" id="xhsFeishuUrl" placeholder="粘贴飞书文档 / 知识库链接"><button class="xhs-btn xhs-btn-secondary" id="xhsBtnImportFeishu">导入</button></div>
-          <div class="xhs-knowledge-ingest-status" id="xhsKnowledgeIngestStatus">资料会自动解析、分段并建立检索索引</div>
-          <div class="xhs-knowledge-toolbar"><span>业务资料</span><button class="xhs-btn xhs-btn-secondary" id="xhsBtnRefreshKnowledge">刷新</button></div>
-          <div class="xhs-knowledge-list" id="xhsDocumentList">点击“刷新”读取业务资料</div>
-          <div class="xhs-knowledge-toolbar"><span id="xhsKnowledgeCount">人工优秀案例</span></div>
-          <div class="xhs-knowledge-list" id="xhsKnowledgeList">点击“刷新”读取人工案例</div>
-        </div>
-      </div>`;
-    document.body.appendChild(root);
-    root.querySelector('#xhsBtnResetTokens')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      resetTokenCircuit();
+    window.XhsDock?.init({
+      onGenerate: () => (state.runMode === 'full_auto' ? runFullAutoCycle() : handleCopilotSession(true)),
+      onSendCard: (type) => sendOfficialCard(type),
+      onLearnHistory: () => learnCurrentHistory(),
+      onSaveFeedback: () => saveHumanFeedback(),
+      onResetTokens: () => resetTokenCircuit(),
+      onSaveConfig: (patch, extra) => saveConfig(patch, extra),
+      onToggleAway: () => {
+        const ending = isFullAutoArmed();
+        saveConfig({}, { arm: !ending });
+        addLog('info', ending ? '已结束无人值守，恢复人工占用' : '已开始无人值守；任何人工操作都会立即退出');
+      },
+      onLoadKnowledge: () => loadKnowledge(),
+      onUploadFiles: (files) => uploadKnowledgeFiles(files),
+      onImportFeishu: () => importFeishuKnowledge()
     });
-    root.querySelector('#xhsPillTrigger').addEventListener('click', () => root.querySelector('#xhsExpandedPanel').classList.toggle('active'));
-    root.querySelector('#xhsClosePanelBtn').addEventListener('click', () => root.querySelector('#xhsExpandedPanel').classList.remove('active'));
-    root.querySelectorAll('.xhs-dock-tab').forEach(tab => tab.addEventListener('click', () => {
-      root.querySelectorAll('.xhs-dock-tab').forEach(item => item.classList.toggle('active', item === tab));
-      root.querySelector('#xhsTabQuick').style.display = tab.dataset.tab === 'quick' ? '' : 'none';
-      root.querySelector('#xhsTabSettings').style.display = tab.dataset.tab === 'settings' ? '' : 'none';
-      root.querySelector('#xhsTabKnowledge').style.display = tab.dataset.tab === 'knowledge' ? '' : 'none';
-      if (tab.dataset.tab === 'knowledge') loadKnowledge();
-    }));
-    root.querySelector('#xhsDockMasterToggle').addEventListener('change', e => saveConfig({ enabled: e.target.checked }));
-    root.querySelector('#xhsDockRunMode').addEventListener('change', e => {
-      saveConfig({ runMode: e.target.value });
-      addLog('info', `模式已切换为：${e.target.value === 'full_auto' ? '全自动秒回' : '半自动副驾'}`);
-    });
-    root.querySelector('#xhsDockTimeScope').addEventListener('change', e => saveConfig({ timeScope: e.target.value }));
-    root.querySelector('#xhsBeginAwayMode').addEventListener('click', () => {
-      const ending = isFullAutoArmed();
-      saveConfig({}, { arm: !ending });
-      addLog('info', ending ? '已结束无人值守，恢复人工占用' : '已开始无人值守；任何人工操作都会立即退出');
-    });
-    root.querySelector('#xhsBtnRefreshKnowledge').addEventListener('click', loadKnowledge);
-    root.querySelector('#xhsKnowledgeFiles').addEventListener('change', e => uploadKnowledgeFiles(e.target.files));
-    root.querySelector('#xhsBtnImportFeishu').addEventListener('click', importFeishuKnowledge);
-    const drop = root.querySelector('#xhsKnowledgeDrop');
-    drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragging'); });
-    drop.addEventListener('dragleave', () => drop.classList.remove('dragging'));
-    drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('dragging'); uploadKnowledgeFiles(e.dataTransfer.files); });
-    root.querySelector('#xhsBtnGenNow').addEventListener('click', () => state.runMode === 'full_auto' ? runFullAutoCycle() : handleCopilotSession(true));
-    root.querySelector('#xhsBtnLearnNow').addEventListener('click', learnCurrentHistory);
-    root.querySelector('#xhsBtnSendWecomCard').addEventListener('click', () => sendOfficialCard('wecom'));
-    root.querySelector('#xhsBtnSendLeadCard').addEventListener('click', () => sendOfficialCard('lead'));
-    root.querySelector('#xhsBtnSaveFeedback').addEventListener('click', saveHumanFeedback);
   }
 
   async function learnCurrentHistory() {
