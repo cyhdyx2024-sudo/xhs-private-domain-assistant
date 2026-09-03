@@ -664,7 +664,11 @@
     const userMessages = turns.filter(t => t.role === 'user' && t.type === 'text').map(t => t.content);
     const botMessages = turns.filter(t => t.role === 'assistant').map(t => t.content);
     const sharedCards = turns.filter(t => t.role === 'user' && t.type === 'card').map(t => t.content);
-    const sig = latestUserTurn ? `${latestUserTurn.timestamp || latestUserTurn.domIndex}:${latestUserTurn.content}` : 'no-user';
+    // 消息签名：优先时间戳，若无时间戳则采用消息总条数与最后发言内容，绝不使用容易在虚拟列表复用时漂移的 domIndex
+    const lastTurnIdentity = latestUserTurn
+      ? `${latestUserTurn.timestamp ? latestUserTurn.timestamp : ('t' + turns.length)}:${latestUserTurn.content}`
+      : 'no-user';
+    const sig = lastTurnIdentity;
     return {
       sessionId: session.id, contactName: session.name, turns, userMessages, botMessages, sharedCards,
       latestUserMsg: latestUserTurn?.content || '', latestUserTurn, latestAssistantTurn, newestTurn,
@@ -898,7 +902,12 @@
       lastSendCardDirective = data.send_card || null;
       const active = getActiveSession();
       const activeHistory = active ? parseConversationHistory(active) : null;
-      if (serial !== requestSerial || !active || active.id !== session.id || activeHistory?.signature !== history.signature) {
+      // 会话有效性判断：只要当前活跃客户仍然是同一个（active.id === session.id），
+      // 且客户没有发送新的消息（最新用户消息与发请求时完全一致），且请求未被人工切换打断（serial === requestSerial），
+      // 即认定结果有效，严禁因虚拟列表重排等细微签名变化直接抛弃结果引发循环请求！
+      const isSameSession = Boolean(active && active.id === session.id);
+      const isLatestMsgUnchanged = activeHistory?.latestUserMsg === history.latestUserMsg;
+      if (serial !== requestSerial || !isSameSession || !isLatestMsgUnchanged) {
         addLog('info', `会话已切换，丢弃 [${session.name}] 的过期结果`);
         return '';
       }
