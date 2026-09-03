@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -28,32 +29,62 @@ def extract_contact_lead(text: str) -> tuple[str, str] | None:
     return None
 
 
-def record_tenant_lead(tenant_id: str, session_id: str, user_name: str, text: str) -> bool:
+def record_tenant_lead(tenant_id: str, session_id: str, user_name: str, text: str, lead_timestamp: int | float | None = None) -> bool:
     lead = extract_contact_lead(text)
     if not lead or not tenant_id:
         return False
     lead_type, lead_value = lead
-    now = datetime.now(timezone.utc).isoformat()
+    lead_created_at = datetime.fromtimestamp(float(lead_timestamp) / 1000, tz=timezone.utc).isoformat() if lead_timestamp else datetime.now(timezone.utc).isoformat()
     try:
-        with sqlite3.connect(FEEDBACK_DB) as conn:
+        with db_connection() as conn:
+            existed = conn.execute(
+                "SELECT 1 FROM tenant_leads WHERE tenant_id=? AND lead_type=? AND lead_value=?",
+                (tenant_id, lead_type, lead_value),
+            ).fetchone()
             conn.execute("""
                 INSERT INTO tenant_leads (id, tenant_id, session_id, user_name, lead_type, lead_value, context_summary, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(tenant_id, lead_type, lead_value) DO UPDATE SET
                     user_name=excluded.user_name,
-                    context_summary=excluded.context_summary,
-                    created_at=excluded.created_at
-            """, (f"lead_{secrets.token_hex(10)}", tenant_id, session_id, user_name, lead_type, lead_value, clean_analysis_text(text, 200), now))
-        return True
+                    context_summary=excluded.context_summary
+            """, (f"lead_{secrets.token_hex(10)}", tenant_id, session_id, user_name, lead_type, lead_value, clean_analysis_text(text, 200), lead_created_at))
+        return existed is None
     except Exception as e:
         print(f"[Lead Record Error] {e}")
         return False
 
 
+def record_explicit_tenant_lead(tenant_id: str, session_id: str, user_name: str,
+                                lead_type: str, lead_value: str, context_summary: str = "",
+                                lead_timestamp: int | float | None = None) -> bool:
+    if lead_type not in {"手机号", "微信号"} or not tenant_id:
+        raise ValueError("invalid_lead")
+    value = str(lead_value or "").strip()
+    valid = re.fullmatch(r"1[3-9]\d{9}", value) if lead_type == "手机号" else re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{5,19}", value)
+    if not valid:
+        raise ValueError("invalid_lead_value")
+    lead_created_at = datetime.fromtimestamp(float(lead_timestamp) / 1000, tz=timezone.utc).isoformat() if lead_timestamp else datetime.now(timezone.utc).isoformat()
+    with db_connection() as conn:
+        existed = conn.execute(
+            "SELECT 1 FROM tenant_leads WHERE tenant_id=? AND lead_type=? AND lead_value=?",
+            (tenant_id, lead_type, value),
+        ).fetchone()
+        conn.execute("""
+            INSERT INTO tenant_leads (id, tenant_id, session_id, user_name, lead_type, lead_value, context_summary, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tenant_id, lead_type, lead_value) DO UPDATE SET
+                session_id=excluded.session_id,
+                user_name=excluded.user_name,
+                context_summary=excluded.context_summary
+        """, (f"lead_{secrets.token_hex(10)}", tenant_id, session_id, user_name, lead_type, value,
+              clean_analysis_text(context_summary, 200), lead_created_at))
+    return existed is None
+
+
 def list_tenant_leads(tenant_id: str) -> list[dict]:
     if not tenant_id:
         return []
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         rows = conn.execute(
             "SELECT id, session_id, user_name, lead_type, lead_value, context_summary, created_at FROM tenant_leads WHERE tenant_id=? ORDER BY created_at DESC LIMIT 100",
             (tenant_id,)
@@ -64,7 +95,7 @@ def list_tenant_leads(tenant_id: str) -> list[dict]:
 def delete_tenant_lead(tenant_id: str, lead_id: str) -> bool:
     if not tenant_id or not lead_id:
         return False
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         cur = conn.execute("DELETE FROM tenant_leads WHERE tenant_id=? AND id=?", (tenant_id, lead_id))
         conn.commit()
         return cur.rowcount > 0
@@ -73,7 +104,7 @@ def delete_tenant_lead(tenant_id: str, lead_id: str) -> bool:
 def clear_tenant_leads(tenant_id: str) -> int:
     if not tenant_id:
         return 0
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         cur = conn.execute("DELETE FROM tenant_leads WHERE tenant_id=?", (tenant_id,))
         conn.commit()
         return cur.rowcount
@@ -87,7 +118,7 @@ def _csv_safe(value) -> str:
 def add_tenant_faq(tenant_id: str, question: str, answer: str, keywords: str) -> dict:
     faq_id = f"faq_{secrets.token_hex(10)}"
     now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.execute(
             "INSERT INTO tenant_faq (id, tenant_id, question, answer, keywords, enabled, usage_count, created_at) VALUES (?, ?, ?, ?, ?, 1, 0, ?)",
             (faq_id, tenant_id, clean_analysis_text(question, 200), clean_analysis_text(answer, 1000), clean_analysis_text(keywords, 200), now)
@@ -99,21 +130,29 @@ def list_tenant_faqs(tenant_id: str) -> list[dict]:
     if not tenant_id:
         return []
     init_feedback_db()
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    safe_defaults = [
+        ('多少钱？怎么收费？', '当前业务资料没有明确价格时，不自行报价或承诺优惠，请由人工按实际版本确认。', '价格,收费,多少钱,套餐,费用'),
+        ('手机上可以用吗？有没有小程序或App？', '当前业务资料没有确认终端支持情况时，不猜测功能，请由人工核对实际产品说明。', '手机,小程序,App,安装,下载,电脑'),
+        ('你们会乱发消息或被封号吗？', '系统默认只生成草稿并由操作员确认发送；仍需遵守平台规则，不能承诺账号绝对安全。', '封号,安全,违规,自动发,群控'),
+        ('可以针对我们行业的特定模板定制吗？', '是否支持行业模板或定制取决于实际产品配置；资料没有明确说明时请由人工确认。', '模板,定制,行业,美业,家装,教培'),
+    ]
+    with db_connection() as conn:
+        # 只迁移曾由本项目自动写入的明确旧承诺；不覆盖用户自行编辑的普通 FAQ。
+        for question, answer, keywords in safe_defaults:
+            conn.execute(
+                """UPDATE tenant_faq SET answer=?, keywords=?
+                   WHERE tenant_id=? AND question=?
+                   AND (answer LIKE '%50 次%' OR answer LIKE '%100% 安全%' OR answer LIKE '%47 套%')""",
+                (answer, keywords, tenant_id, question),
+            )
         count = conn.execute("SELECT COUNT(*) FROM tenant_faq WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
         if count == 0:
-            faqs = [
-                ('多少钱？怎么收费？', '目前新作 2.0 处于商用内测阶段，提供免费算力体验包。方便留个联系方式吗？我先给您的手机号开通 50 次免费生成额度，您先体验出图效果，后续正式套餐会根据您的使用频率灵活选择。', '价格,收费,多少钱,套餐,费用'),
-                ('手机上可以用吗？有没有小程序或App？', '新作 2.0 主要是免下载的电脑网页端工具，直接在浏览器打开即可。因为小红书 3:4 多页图文涉及精细的排版、字数门禁和模板调整，电脑大屏操作最轻量顺畅。', '手机,小程序,App,安装,下载,电脑'),
-                ('你们会乱发消息或被封号吗？', '我们坚守合规底线，不做任何高风险的群控刷量或未经审核的无脑乱发。工具定位是您的“内容与客服副驾”——AI 负责高效起草和专业排版，最终发布与发送始终由您确认把关，确保账号 100% 安全。', '封号,安全,违规,自动发,群控'),
-                ('可以针对我们行业的特定模板定制吗？', '完全可以！系统已经内置了 47 套行业专属模板（家装/美业/摄影/教培等），同时支持在知识库中上传您的门店资料、价格表和案例，生成出来的内容自带您的业务特色。', '模板,定制,行业,美业,家装,教培')
-            ]
-            for q, a, kw in faqs:
+            for q, a, kw in safe_defaults:
                 conn.execute(
                     "INSERT INTO tenant_faq (id, tenant_id, question, answer, keywords, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (f"faq_{secrets.token_hex(8)}", tenant_id, q, a, kw, datetime.now(timezone.utc).isoformat())
                 )
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         rows = conn.execute(
             "SELECT id, question, answer, keywords, enabled, usage_count, created_at FROM tenant_faq WHERE tenant_id=? ORDER BY created_at DESC",
             (tenant_id,)
@@ -122,7 +161,7 @@ def list_tenant_faqs(tenant_id: str) -> list[dict]:
 
 
 def delete_tenant_faq(tenant_id: str, faq_id: str) -> bool:
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         cur = conn.execute("DELETE FROM tenant_faq WHERE id=? AND tenant_id=?", (faq_id, tenant_id))
         return cur.rowcount > 0
 
@@ -131,7 +170,7 @@ def retrieve_faq_matches(query: str, tenant_id: str) -> list[dict]:
     if not query or not tenant_id:
         return []
     q_terms = _terms(query)
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         rows = conn.execute(
             "SELECT id, question, answer, keywords FROM tenant_faq WHERE tenant_id=? AND enabled=1",
             (tenant_id,)
@@ -153,6 +192,17 @@ FEEDBACK_DB = Path(os.environ.get(
     "XHS_FEEDBACK_DB",
     Path(__file__).resolve().parent / "data" / "xhs_reply_feedback.sqlite3",
 ))
+
+
+@contextmanager
+def db_connection(path: Path | str | None = None):
+    """提供事务语义并确保 SQLite 连接在每次操作后关闭。"""
+    conn = sqlite3.connect(path or FEEDBACK_DB)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 
@@ -180,9 +230,57 @@ def redact_sensitive(value: str) -> str:
     return text.strip()
 
 
+def sanitize_history_samples(sessions: list) -> tuple[list[dict], dict]:
+    """限制并脱敏首次学习样本；客户内容仅保留为场景，学习必须以客服回复为准。"""
+    if not isinstance(sessions, list):
+        raise ValueError("invalid_history_samples")
+    cleaned_sessions: list[dict] = []
+    total_chars = 0
+    assistant_turns = 0
+    for raw_session in sessions[:12]:
+        if not isinstance(raw_session, dict) or not isinstance(raw_session.get("turns"), list):
+            continue
+        cleaned_turns = []
+        for raw_turn in raw_session["turns"][:30]:
+            if not isinstance(raw_turn, dict) or raw_turn.get("role") not in {"user", "assistant"}:
+                continue
+            content = redact_sensitive(raw_turn.get("content") or "")
+            remaining = 30000 - total_chars
+            if remaining <= 0:
+                break
+            content = content[:remaining].strip()
+            if not content:
+                continue
+            role = raw_turn["role"]
+            cleaned_turns.append({
+                "role": role,
+                "content": content,
+                "type": "card" if raw_turn.get("type") == "card" else "text",
+            })
+            total_chars += len(content)
+            if role == "assistant":
+                assistant_turns += 1
+        if cleaned_turns:
+            cleaned_sessions.append({
+                "session_id": hashlib.sha256(str(raw_session.get("session_id") or "unknown").encode()).hexdigest()[:16],
+                "user_name": "客户",
+                "turns": cleaned_turns,
+            })
+        if total_chars >= 30000:
+            break
+    if assistant_turns == 0:
+        raise ValueError("no_valid_assistant_samples")
+    return cleaned_sessions, {
+        "session_count": len(cleaned_sessions),
+        "assistant_turns": assistant_turns,
+        "total_chars": total_chars,
+        "truncated": len(sessions) > 12 or total_chars >= 30000,
+    }
+
+
 def init_feedback_db() -> None:
     FEEDBACK_DB.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS reply_feedback (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -311,7 +409,7 @@ def init_feedback_db() -> None:
 
 def log_reply(tenant_id: str, session_id: str, user_name: str, latest_msg: str, reply: str, action: str, latency_ms: int) -> None:
     try:
-        with sqlite3.connect(FEEDBACK_DB) as conn:
+        with db_connection() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO reply_log (id, tenant_id, session_id, user_name, latest_msg, reply, action, latency_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (f"r_{secrets.token_hex(10)}", tenant_id or "", session_id or "", user_name or "",
@@ -323,14 +421,14 @@ def log_reply(tenant_id: str, session_id: str, user_name: str, latest_msg: str, 
 
 
 def set_tenant_webhook(tenant_id: str, webhook_url: str) -> None:
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.execute("UPDATE tenants SET webhook_url=?, updated_at=? WHERE id=?",
                      (clean_analysis_text(webhook_url, 300), datetime.now(timezone.utc).isoformat(), tenant_id))
 
 
 def get_tenant_webhook(tenant: dict | None) -> str:
     if tenant:
-        with sqlite3.connect(FEEDBACK_DB) as conn:
+        with db_connection() as conn:
             row = conn.execute("SELECT webhook_url FROM tenants WHERE id=?", (tenant["id"],)).fetchone()
             if row:
                 return row[0] or ""
@@ -358,7 +456,7 @@ def push_webhook(webhook_url: str, text: str) -> bool:
 def alert_once(tenant_id: str, kind: str, ref_id: str, text: str, webhook_url: str) -> bool:
     """推送一次提醒；同租户同类型同对象只提醒一次。"""
     try:
-        with sqlite3.connect(FEEDBACK_DB) as conn:
+        with db_connection() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO alert_log (id, tenant_id, kind, ref_id, created_at) VALUES (?,?,?,?,?)",
                 (f"a_{secrets.token_hex(10)}", tenant_id, kind, ref_id, datetime.now(timezone.utc).isoformat()),
@@ -379,13 +477,14 @@ def today_stats(tenant: dict | None) -> dict:
     lead_where, reply_where = ("WHERE tenant_id=?", "WHERE tenant_id=?") if tenant_id else ("WHERE 1=1", "WHERE 1=1")
     lead_params: tuple = (tenant_id, day_start) if tenant_id else (day_start,)
     reply_params: tuple = (tenant_id, day_start) if tenant_id else (day_start,)
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         leads_today = conn.execute(f"SELECT COUNT(*) FROM tenant_leads {lead_where} AND created_at>=?", lead_params).fetchone()[0]
         replies_today, avg_latency = conn.execute(
             f"SELECT COUNT(*), COALESCE(AVG(latency_ms),0) FROM reply_log {reply_where} AND created_at>=?", reply_params
         ).fetchone()
         recent_messages = [row[0] for row in conn.execute(
-            "SELECT latest_msg FROM reply_log WHERE created_at>=? ORDER BY created_at DESC LIMIT 50", (day_start,)
+            f"SELECT latest_msg FROM reply_log {reply_where} AND created_at>=? ORDER BY created_at DESC LIMIT 50",
+            reply_params,
         ).fetchall()]
     buckets: dict[str, int] = {}
     for message in recent_messages:
@@ -414,7 +513,7 @@ def push_daily_digest_if_due() -> None:
     if now.hour < REPORT_HOUR:
         return
     try:
-        with sqlite3.connect(FEEDBACK_DB) as conn:
+        with db_connection() as conn:
             tenants = conn.execute("SELECT id, workspace_name, webhook_url FROM tenants WHERE webhook_url != ''").fetchall()
         for tenant_id, name, webhook in tenants:
             stats = today_stats({"id": tenant_id})
@@ -432,13 +531,13 @@ def alert_worker() -> None:
         try:
             now = datetime.now(timezone.utc)
             window_start = (now - timedelta(minutes=2)).isoformat()
-            with sqlite3.connect(FEEDBACK_DB) as conn:
+            with db_connection() as conn:
                 fresh = conn.execute(
                     "SELECT id, tenant_id, user_name, lead_type, lead_value, context_summary FROM tenant_leads WHERE created_at>=?",
                     (window_start,),
                 ).fetchall()
             for lead_id, tenant_id, user_name, lead_type, lead_value, summary in fresh:
-                with sqlite3.connect(FEEDBACK_DB) as conn:
+                with db_connection() as conn:
                     webhook = conn.execute("SELECT webhook_url FROM tenants WHERE id=?", (tenant_id,)).fetchone()
                 webhook_url = (webhook[0] if webhook else "") or ALERT_WEBHOOK
                 if webhook_url:
@@ -458,12 +557,16 @@ def register_tenant(workspace_name: str) -> dict:
     tenant_id = f"t_{secrets.token_hex(8)}"
     access_token = f"xhs_live_{secrets.token_urlsafe(32)}"
     now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.execute(
             """INSERT INTO tenants
-               (id, token_hash, workspace_name, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (tenant_id, token_hash(access_token), clean_analysis_text(workspace_name or "我的工作区", 80), now, now),
+               (id, token_hash, workspace_name, brand_name, business_profile, reply_preferences, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tenant_id, token_hash(access_token), clean_analysis_text(workspace_name or "我的工作区", 80),
+             "新作AI",
+             "【产品定位】新作AI（新作2.0）：面向中小企业与内容创作者的电脑网页端获客图文工具，支持3:4多页图文排版、业务资料知识库与小红书私信副驾。包含专属内测邀请码与算力福利。",
+             "先回应客户最后一条消息中的具体问题；结合上下文自然引导体验电脑端或留微信号；语气像真人主理人，自然干练，不堆Emoji，不生硬推销。",
+             now, now),
         )
     return {"tenant_id": tenant_id, "access_token": access_token}
 
@@ -474,7 +577,7 @@ def rotate_tenant_token(identifier: str) -> dict:
     if not value:
         raise ValueError("workspace_identifier_required")
     init_feedback_db()
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         rows = conn.execute(
             "SELECT id, workspace_name FROM tenants WHERE id = ? OR workspace_name = ? ORDER BY created_at DESC",
             (value, value),
@@ -496,7 +599,7 @@ def get_tenant_by_token(access_token: str) -> dict | None:
     if not access_token:
         return None
     init_feedback_db()
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM tenants WHERE token_hash = ?", (token_hash(access_token),)).fetchone()
     return dict(row) if row else None
@@ -512,7 +615,7 @@ def update_tenant(tenant_id: str, payload: dict) -> dict:
     values["account_id"] = re.sub(r"[^0-9A-Za-z_-]", "", values["account_id"])
     values["business_line"] = normalize_scope(values["business_line"] or "default")
     now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.execute(
             """UPDATE tenants SET workspace_name=?, account_id=?, business_line=?, brand_name=?,
                business_profile=?, knowledge_text=?, reply_preferences=?, updated_at=? WHERE id=?""",
@@ -536,7 +639,7 @@ def tenant_scope(tenant: dict | None, requested: str = "default") -> str:
 def feedback_scope_stats(scope: str) -> dict:
     init_feedback_db()
     scope = normalize_scope(scope)
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         total = conn.execute("SELECT COUNT(*) FROM reply_feedback WHERE scope = ? AND enabled = 1", (scope,)).fetchone()[0]
         disabled = conn.execute("SELECT COUNT(*) FROM reply_feedback WHERE scope = ? AND enabled = 0", (scope,)).fetchone()[0]
     return {"knowledge_count": total, "disabled_count": disabled, "scope": scope}
@@ -594,7 +697,7 @@ def retrieve_feedback_examples(latest_msg: str, turns: list, scope: str = "defau
         return []
     scope = normalize_scope(scope)
     query_bucket = detect_intent_bucket(query_text)
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, latest_msg, human_reply, reason, analysis_json FROM reply_feedback WHERE scope = ? AND enabled = 1 ORDER BY id DESC LIMIT 300",
@@ -616,7 +719,7 @@ def retrieve_feedback_examples(latest_msg: str, turns: list, scope: str = "defau
         scored.append((score, dict(row)))
     matches = [row for score, row in sorted(scored, key=lambda item: item[0], reverse=True)[:limit] if score >= 0.035]
     if matches:
-        with sqlite3.connect(FEEDBACK_DB) as conn:
+        with db_connection() as conn:
             conn.executemany("UPDATE reply_feedback SET usage_count = usage_count + 1 WHERE id = ?", [(row["id"],) for row in matches])
     return matches
 
@@ -701,7 +804,7 @@ def save_feedback(payload: dict, model_config: dict | None = None) -> dict:
     session_hash = hashlib.sha256(str(payload.get("session_id") or "unknown").encode("utf-8")).hexdigest()[:16]
     fingerprint = hashlib.sha256(f"{scope}\n{latest_msg}\n{human_reply}".encode("utf-8")).hexdigest()
     now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.execute(
             """INSERT INTO reply_feedback
                (fingerprint, created_at, session_hash, latest_msg, context_json, ai_reply, human_reply, reason, analysis_json, scope)
@@ -720,7 +823,7 @@ def list_feedback(scope: str = "default", limit: int = 30) -> list[dict]:
     init_feedback_db()
     scope = normalize_scope(scope)
     safe_limit = max(1, min(int(limit or 30), 100))
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, created_at, latest_msg, human_reply, reason, analysis_json, usage_count, enabled, disabled_at FROM reply_feedback WHERE scope = ? ORDER BY id DESC LIMIT ?",
@@ -740,7 +843,7 @@ def set_feedback_enabled(feedback_id: int, enabled: bool, scope: str = "default"
     init_feedback_db()
     scope = normalize_scope(scope)
     disabled_at = "" if enabled else datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection() as conn:
         cursor = conn.execute(
             "UPDATE reply_feedback SET enabled = ?, disabled_at = ? WHERE id = ? AND scope = ?",
             (1 if enabled else 0, disabled_at, int(feedback_id), scope),

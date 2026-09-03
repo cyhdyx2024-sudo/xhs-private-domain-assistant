@@ -15,7 +15,7 @@ class PdfIngestRegressionTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_extract_and_ingest_pdf(self):
-        pdf_path = Path("server/data/新作AI2.0官方产品手册.pdf")
+        pdf_path = Path(__file__).resolve().parent / "data" / "新作AI2.0官方产品手册.pdf"
         if not pdf_path.exists():
             self.skipTest("PDF sample not generated yet")
         pdf_bytes = pdf_path.read_bytes()

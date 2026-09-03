@@ -22,6 +22,15 @@
     return { statsDate, repliedCount: 0, leadsCount: 0 };
   }
 
+  function isSameDay(t1, t2 = Date.now()) {
+    if (!t1) return false;
+    const d1 = new Date(Number(t1));
+    const d2 = new Date(Number(t2));
+    return d1.getFullYear() === d2.getFullYear() &&
+           d1.getMonth() === d2.getMonth() &&
+           d1.getDate() === d2.getDate();
+  }
+
   function retryDelayMs(status, failureCount = 1) {
     if (status === 401 || status === 403) return Infinity;
     const count = Math.max(1, Number(failureCount || 1));
@@ -59,6 +68,33 @@
     return (blacklist || []).some(item => item && value.includes(String(item).trim()));
   }
 
+  function extractContactLead(turns = [], platformLeadHint = false) {
+    const items = Array.isArray(turns) ? turns : [];
+    const directPattern = /(?:微信号?|vx|wx)[\s:：_\-]*([a-z][a-z0-9_-]{5,19}|1[3-9]\d{9})/i;
+    const contactCue = /微信|手机号|手机号码|电话|联系方式|加你|加您|加我|添加|好友|备注小红书|留个.{0,4}(?:号|联系)/i;
+    for (const turn of items) {
+      if (turn?.role !== 'user') continue;
+      const text = String(turn.content || '').replace(/\s+/g, ' ').trim();
+      const phone = text.match(/(?:1[3-9]\d{9})/);
+      if (phone) return { type: '手机号', value: phone[0], source: 'direct', timestamp: Number(turn.timestamp || 0) };
+      const wechat = text.match(directPattern);
+      if (wechat) return { type: '微信号', value: wechat[1] || wechat[0], source: 'direct', timestamp: Number(turn.timestamp || 0) };
+    }
+    for (let index = 0; index < items.length; index += 1) {
+      const turn = items[index];
+      if (turn?.role !== 'user') continue;
+      const text = String(turn.content || '').trim();
+      // 纯微信号只有在平台已标记留资，或相邻对话明确谈到加联系方式时才识别，避免把普通英文误当客资。
+      if (!/^[a-z][a-z0-9_-]{5,19}$/i.test(text) || !/[0-9_-]/.test(text)) continue;
+      const nearby = items.slice(Math.max(0, index - 2), index + 3)
+        .filter((item, nearbyIndex) => item !== turn && (item?.role === 'assistant' || nearbyIndex >= 0))
+        .map(item => String(item?.content || ''))
+        .join(' ');
+      if (platformLeadHint || contactCue.test(nearby)) return { type: '微信号', value: text, source: 'context', timestamp: Number(turn.timestamp || 0) };
+    }
+    return null;
+  }
+
   function isHalfTurnTransform(transform) {
     const value = String(transform || '').trim();
     if (!value || value === 'none') return false;
@@ -77,8 +113,13 @@
     return { atBottom: remaining <= 8, targetScrollTop: Number(scrollHeight || 0) };
   }
 
+  function shouldAbortLeadSync(syncStartedAt = 0, lastUserActivityAt = 0) {
+    return Number(lastUserActivityAt || 0) > Number(syncStartedAt || 0);
+  }
+
   return {
-    HOUR_MS, localDateKey, normalizeDailyStats, retryDelayMs, messageAgeDecision,
-    parseMessageTimestamp, isExcludedContact, isHalfTurnTransform, messageBottomState
+    HOUR_MS, localDateKey, normalizeDailyStats, isSameDay, retryDelayMs, messageAgeDecision,
+    parseMessageTimestamp, isExcludedContact, extractContactLead, isHalfTurnTransform, messageBottomState,
+    shouldAbortLeadSync
   };
 });

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>私信智能顾问 · 企业工作台 Studio</title>
+  <title>私信顾问 · 工作台设置</title>
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
@@ -12,39 +12,24 @@
     <div class="brand">
       <div class="brand-dot"></div>
       <div>
-        <div class="brand-title">私信智能顾问</div>
-        <div style="font-size:11px;color:var(--text-muted);">Enterprise Studio</div>
+        <div class="brand-title">私信顾问</div>
+        <div class="brand-subtitle">工作台设置</div>
       </div>
       <span class="brand-badge">V1.1</span>
     </div>
 
-    <nav class="nav-menu">
-      <div class="nav-item active" data-tab="models">
-        <span>🤖</span> 模型与引擎中心
-      </div>
-      <div class="nav-item" data-tab="business">
-        <span>🏢</span> 业务画像与语气调性
-      </div>
-      <div class="nav-item" data-tab="knowledge">
-        <span>📚</span> 专业知识库 Studio
-      </div>
-      <div class="nav-item" data-tab="faq">
-        <span>💬</span> 结构化标准问答 (FAQ)
-      </div>
-      <div class="nav-item" data-tab="crm">
-        <span>👥</span> 捕获客资与线索中心
-      </div>
-      <div class="nav-item" data-tab="runtime">
-        <span>⚡</span> 运行监控与安全
-      </div>
+    <nav class="nav-menu" aria-label="工作台模块">
+      <button type="button" class="nav-item active" data-tab="reply" aria-current="page">我的回复方式</button>
+      <button type="button" class="nav-item" data-tab="crm">客户跟进</button>
+      <button type="button" class="nav-item" data-tab="settings">接入设置</button>
     </nav>
 
     <div class="sidebar-footer">
       <button class="btn btn-primary" id="btnSaveAll" style="width:100%;">
-        💾 保存全局配置
+        保存配置
       </button>
       <a href="https://pro.xiaohongshu.com/im/multiCustomerService" target="_blank" class="btn btn-secondary" style="width:100%;text-decoration:none;">
-        🚀 打开小红书客服台
+        打开小红书客服台
       </a>
     </div>
   </aside>
@@ -52,18 +37,18 @@
   <!-- Main Wrapper -->
   <div class="main-wrapper">
     <header class="top-header">
-      <div class="header-title" id="pageHeaderTitle">🤖 大模型服务商与 API 引擎配置</div>
+      <div class="header-title" id="pageHeaderTitle">我的回复方式</div>
       <div class="header-actions">
         <div class="status-pill online" id="topStatusPill">
           <span class="pulse-dot"></span> <span id="topStatusText">本地就绪</span>
         </div>
-        <button class="btn btn-secondary btn-sm" id="btnReloadExtension">🔄 重新加载插件</button>
+        <button class="btn btn-secondary btn-sm" id="btnReloadExtension">重新加载插件</button>
       </div>
     </header>
 
     <main class="content-area">
       <!-- Tab 1: Models -->
-      <section class="tab-pane active" id="tab-models">
+      <section class="tab-pane" id="tab-models" data-group="settings">
         <div class="card">
           <div class="card-header">
             <div>
@@ -77,7 +62,7 @@
             <div class="form-group">
               <label class="form-label">大模型服务商</label>
               <select class="form-select" id="modelProvider">
-                <option value="gemini_local">⚡ 本地开发测试 (Gemini 3.7 Flash · 免填 Key 直接测试)</option>
+                <option value="opencodex_local">OpenCodex 本机模型（推荐，可不填 Key）</option>
                 <option value="deepseek">DeepSeek 深度求索 (推荐 · 性价比最高)</option>
                 <option value="openai">OpenAI (GPT-4o / GPT-4o-mini / o3-mini)</option>
                 <option value="dashscope">阿里通义千问 (DashScope · Qwen-Plus/Max)</option>
@@ -135,7 +120,23 @@
       </section>
 
       <!-- Tab 2: Business -->
-      <section class="tab-pane" id="tab-business">
+      <section class="tab-pane active" id="tab-business" data-group="reply">
+        <div class="card learn-card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">让它先学会你怎么回复</div>
+              <div class="card-desc">从当前客服台已读取的真实对话中提炼业务画像、推进方式和表达习惯，学习完成后自动写入。</div>
+            </div>
+            <button type="button" class="btn btn-primary" id="btnLearnHistory">从历史对话学习</button>
+          </div>
+          <div class="learn-state" id="learnHistoryStatus" role="status" aria-live="polite">
+            尚未学习。请先打开小红书客服台并进入一个有历史消息的客户会话。
+          </div>
+          <details class="preview-details">
+            <summary>抽查 5 条模拟回复（可选）</summary>
+            <div class="preview-empty">学习完成后再生成抽查内容；这里不会自动编造示例。</div>
+          </details>
+        </div>
         <div class="card">
           <div class="card-header">
             <div>
@@ -200,7 +201,7 @@
       </section>
 
       <!-- Tab 3: Knowledge Studio -->
-      <section class="tab-pane" id="tab-knowledge">
+      <section class="tab-pane settings-secondary" id="tab-knowledge" data-group="settings">
         <div class="card">
           <div class="card-header">
             <div>
@@ -275,7 +276,7 @@
       </section>
 
       <!-- Tab 4: FAQ (New Feature) -->
-      <section class="tab-pane" id="tab-faq">
+      <section class="tab-pane settings-secondary" id="tab-faq" data-group="settings">
         <div class="card">
           <div class="card-header">
             <div>
@@ -329,7 +330,18 @@
       </section>
 
       <!-- Tab 5: CRM Leads (New Feature) -->
-      <section class="tab-pane" id="tab-crm">
+      <section class="tab-pane" id="tab-crm" data-group="crm">
+        <div class="card followup-card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">待处理客户</div>
+              <div class="card-desc">系统只生成跟进草稿，不会自动群发。企微名片已点击，不代表客户已经添加成功。</div>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshFollowups">刷新</button>
+          </div>
+          <div class="followup-summary" id="followupSummary" role="status" aria-live="polite">正在读取客户状态…</div>
+          <div class="followup-list" id="followupList"></div>
+        </div>
         <div class="card">
           <div class="card-header">
             <div>
@@ -406,7 +418,7 @@
       </section>
 
       <!-- Tab 6: Runtime -->
-      <section class="tab-pane" id="tab-runtime">
+      <section class="tab-pane settings-secondary" id="tab-runtime" data-group="settings">
         <div class="card">
           <div class="card-header">
             <div>

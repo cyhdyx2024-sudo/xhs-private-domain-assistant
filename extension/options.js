@@ -3,6 +3,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const SERVICE_URL = 'http://127.0.0.1:18195';
 
   const PROVIDERS = {
+    opencodex_local: { url: 'http://127.0.0.1:10100/v1/chat/completions', model: 'google-antigravity/gemini-3.7-flash', embeddingUrl: '', embeddingModel: '' },
+    // 兼容旧版本地配置，界面统一显示为 OpenCodex。
     gemini_local: { url: 'http://127.0.0.1:10100/v1/chat/completions', model: 'google-antigravity/gemini-3.7-flash', embeddingUrl: '', embeddingModel: '' },
     deepseek: { url: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat', embeddingUrl: '', embeddingModel: '' },
     openai: { url: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4.1-mini', embeddingUrl: 'https://api.openai.com/v1/embeddings', embeddingModel: 'text-embedding-3-small' },
@@ -22,6 +24,33 @@ document.addEventListener('DOMContentLoaded', async () => {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   })[char]);
 
+  async function bridgeFetch(url, options = {}) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({
+        type: 'BRIDGE_FETCH',
+        url,
+        options: {
+          method: options.method || 'GET',
+          headers: options.headers || {},
+          body: options.body || undefined
+        }
+      }, res => {
+        if (chrome.runtime.lastError) {
+          return reject(new Error(chrome.runtime.lastError.message));
+        }
+        if (!res) return reject(new Error('未收到响应'));
+        const pseudoResponse = {
+          ok: Boolean(res.ok),
+          status: Number(res.status || 0),
+          statusText: String(res.statusText || ''),
+          json: async () => (res.data !== null ? res.data : JSON.parse(res.text || '{}')),
+          text: async () => String(res.text || '')
+        };
+        resolve(pseudoResponse);
+      });
+    });
+  }
+
   async function readJson(response) {
     const text = await response.text();
     try { return text ? JSON.parse(text) : {}; }
@@ -34,7 +63,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     pill.classList.remove('online', 'warning', 'error');
     label.textContent = '正在检查本机 Bridge…';
     try {
-      const response = await fetch(`${SERVICE_URL}/healthz`, { cache: 'no-store' });
+      const response = await bridgeFetch(`${SERVICE_URL}/healthz`, { cache: 'no-store' });
       const data = await readJson(response);
       if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
       if (data.product_mode !== true) {
@@ -53,7 +82,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function registerWorkspace(workspaceName) {
-    const response = await fetch(`${SERVICE_URL}/tenant/register`, {
+    const response = await bridgeFetch(`${SERVICE_URL}/tenant/register`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workspace_name: workspaceName })
     });
@@ -63,7 +92,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function saveTenantConfig(token, payload) {
-    const response = await fetch(`${SERVICE_URL}/tenant/config`, {
+    const response = await bridgeFetch(`${SERVICE_URL}/tenant/config`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify(payload)
@@ -78,7 +107,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     'workspaceName', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl',
     'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'accountId',
     'knowledgeScope', 'brandName', 'operatorNickname', 'businessProfile', 'replyPreferences', 'toneProfile',
-    'autoReplyMaxAgeMinutes', 'contactBlacklist', 'configVersion'
+    'autoReplyMaxAgeMinutes', 'contactBlacklist', 'configVersion', 'followupStateMap',
+    'historyLearnedAt', 'learnedSummary'
   ];
 
   let config = await storageGet(keys);
@@ -87,24 +117,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   const navItems = document.querySelectorAll('.nav-item');
   const tabPanes = document.querySelectorAll('.tab-pane');
   const pageTitles = {
-    models: '🤖 大模型服务商与 API 引擎配置',
-    business: '🏢 店铺画像与语气调性',
-    knowledge: '📚 专业业务知识库 Studio',
-    faq: '💬 结构化标准问答库 (FAQ)',
-    crm: '👥 捕获客资与线索中心',
-    runtime: '⚡ 智能值守运行监控与安全'
+    reply: '我的回复方式',
+    crm: '客户跟进',
+    settings: '接入设置'
   };
 
   navItems.forEach(item => {
     item.addEventListener('click', () => {
       const target = item.dataset.tab;
-      navItems.forEach(n => n.classList.toggle('active', n === item));
-      tabPanes.forEach(p => p.classList.toggle('active', p.id === `tab-${target}`));
-      $('pageHeaderTitle').textContent = pageTitles[target] || '企业控制台';
-      if (target === 'knowledge') loadDocuments();
-      if (target === 'faq') loadFaqs();
-      if (target === 'crm') { loadLeads(); loadTodayReport(); }
-      if (target === 'runtime') loadFeedback();
+      navItems.forEach(n => {
+        const active = n === item;
+        n.classList.toggle('active', active);
+        if (active) n.setAttribute('aria-current', 'page');
+        else n.removeAttribute('aria-current');
+      });
+      tabPanes.forEach(p => p.classList.toggle('active', p.dataset.group === target));
+      $('pageHeaderTitle').textContent = pageTitles[target] || '工作台设置';
+      if (target === 'crm') { loadFollowupQueue(); loadLeads(); loadTodayReport(); }
+      if (target === 'settings') { loadDocuments(); loadFaqs(); loadFeedback(); }
     });
   });
 
@@ -117,26 +147,34 @@ document.addEventListener('DOMContentLoaded', async () => {
         break;
       }
     }
-    if (!config.modelBaseUrl && !config.modelApiKey) matchedProvider = 'gemini_local';
+    if (!config.modelApiKey) matchedProvider = 'opencodex_local';
+    if (config.modelBaseUrl === PROVIDERS.opencodex_local.url) matchedProvider = 'opencodex_local';
+    if (!config.modelBaseUrl && !config.modelApiKey) matchedProvider = 'opencodex_local';
     $('modelProvider').value = matchedProvider;
 
-    const defaultProvider = PROVIDERS[matchedProvider] || PROVIDERS.gemini_local;
-    $('modelBaseUrl').value = config.modelBaseUrl || defaultProvider.url;
-    $('modelName').value = config.modelName || defaultProvider.model;
+    const defaultProvider = PROVIDERS[matchedProvider] || PROVIDERS.opencodex_local;
+    $('modelBaseUrl').value = config.modelApiKey ? (config.modelBaseUrl || defaultProvider.url) : defaultProvider.url;
+    $('modelName').value = config.modelApiKey ? (config.modelName || defaultProvider.model) : defaultProvider.model;
     $('modelApiKey').value = config.modelApiKey || '';
     $('embeddingBaseUrl').value = config.embeddingBaseUrl || '';
     $('embeddingModel').value = config.embeddingModel || '';
     $('embeddingApiKey').value = config.embeddingApiKey || '';
 
-    $('workspaceName').value = config.workspaceName || '新作AI创作工作台';
+    $('workspaceName').value = config.workspaceName || '我的工作区';
     $('workspaceToken').value = config.workspaceToken || '';
-    $('accountId').value = config.accountId || '49321885008';
+    $('accountId').value = config.accountId || '';
     $('businessLine').value = config.knowledgeScope || 'default';
     $('brandName').value = config.brandName || '新作AI';
     $('operatorNickname').value = config.operatorNickname || '新作AI';
     $('toneProfile').value = config.toneProfile || 'creator_ip';
-    $('businessProfile').value = config.businessProfile || '【产品定位】新作AI（新作2.0）：面向中小企业与内容创作者的免安装电脑网页端获客图文工具。内置3:4多页图文卡片排版、47套行业专属模板与知识库，擅长将业务资料一键生成高转化小红书笔记。目前商用内测中，支持免费领取体验算力与专属邀请码。';
-    $('replyPreferences').value = config.replyPreferences || '先回应客户最后一条消息中的具体问题；结合上下文自然引导体验或留资；语气像真人主理人，自然干练，不堆Emoji，不生硬推销，不虚构未完成动作。';
+    $('businessProfile').value = config.businessProfile || '【产品定位】新作AI（新作2.0）：面向中小企业与内容创作者的电脑网页端获客图文工具，支持3:4多页图文排版、业务资料知识库与小红书私信副驾。包含专属内测邀请码与算力福利。';
+    $('replyPreferences').value = config.replyPreferences || '先回应客户最后一条消息中的具体问题；结合上下文自然引导体验电脑端或留微信号；语气像真人主理人，自然干练，不堆Emoji，不生硬推销。';
+
+    const learnStatus = $('learnHistoryStatus');
+    if (config.historyLearnedAt) {
+      learnStatus.textContent = `${config.learnedSummary || '已学习历史回复'} · 可继续在下方补充修改`;
+      learnStatus.classList.add('success');
+    }
 
     $('feishuAppId').value = config.feishuAppId || '';
     $('feishuAppSecret').value = config.feishuAppSecret || '';
@@ -150,6 +188,34 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Model Provider Switch
+  async function loadOpenCodexModels() {
+    if ($('modelProvider').value !== 'opencodex_local') return;
+    try {
+      const response = await fetch('http://127.0.0.1:10100/v1/models', { cache: 'no-store' });
+      const data = await readJson(response);
+      const models = Array.isArray(data.data) ? data.data.map(item => item.id).filter(Boolean) : [];
+      if (models.length && !models.includes($('modelName').value.trim())) {
+        $('modelName').value = models.includes('google-antigravity/gemini-3.7-flash')
+          ? 'google-antigravity/gemini-3.7-flash'
+          : models[0];
+      }
+      $('modelName').setAttribute('list', 'opencodexModelList');
+      let list = $('opencodexModelList');
+      if (!list) {
+        list = document.createElement('datalist');
+        list.id = 'opencodexModelList';
+        document.body.appendChild(list);
+      }
+      list.replaceChildren(...models.slice(0, 100).map(id => {
+        const option = document.createElement('option');
+        option.value = id;
+        return option;
+      }));
+    } catch (_) {
+      // OpenCodex 未启动时保留可编辑模型名，由连接测试给出明确错误。
+    }
+  }
+
   $('modelProvider').addEventListener('change', e => {
     const p = PROVIDERS[e.target.value];
     if (p && e.target.value !== 'custom') {
@@ -158,6 +224,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       $('embeddingBaseUrl').value = p.embeddingUrl;
       $('embeddingModel').value = p.embeddingModel;
     }
+    loadOpenCodexModels();
   });
 
   // Save All Configuration
@@ -169,11 +236,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       const modelUrl = $('modelBaseUrl').value.trim();
       const modelName = $('modelName').value.trim();
       const modelKey = $('modelApiKey').value.trim();
-      const bridgeIsLocal = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i.test(SERVICE_URL);
-      const isLocalGateway = $('modelProvider').value === 'gemini_local' || (modelUrl.includes('127.0.0.1') || modelUrl.includes('localhost'));
-      const usingServerGateway = !modelKey && !modelUrl && !modelName;
-      if (!usingServerGateway && !isLocalGateway) {
-        if (!modelKey) throw new Error('请先填写大模型 API Key，或将三个模型字段全部留空以使用服务端网关');
+      const isLocalGateway = $('modelProvider').value === 'opencodex_local'
+        || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/v1\/chat\/completions\/?$/i.test(modelUrl);
+      if (!isLocalGateway) {
+        if (!modelKey) throw new Error('请先填写大模型 API Key');
         if (!modelUrl || !/^https:\/\//i.test(modelUrl)) throw new Error('模型 API 地址必须是有效的 HTTPS 地址');
         if (!modelName) throw new Error('请填写模型名称');
       }
@@ -202,7 +268,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // 3. Save Local Config
       const newConfig = {
-        configVersion: '1.1.0',
+        configVersion: Date.now(),
         onboardingComplete: true,
         enabled: $('masterToggle').value === 'true',
         runMode: $('runMode').value,
@@ -241,11 +307,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (tab.id) chrome.tabs.sendMessage(tab.id, { type: 'CONFIG_UPDATED', config: newConfig }).catch(() => {});
       });
 
-      $('btnSaveAll').textContent = '✅ 配置已保存';
-      setTimeout(() => { $('btnSaveAll').textContent = '💾 保存全局配置'; $('btnSaveAll').disabled = false; }, 1500);
+      $('btnSaveAll').textContent = '已保存';
+      setTimeout(() => { $('btnSaveAll').textContent = '保存配置'; $('btnSaveAll').disabled = false; }, 1500);
     } catch (err) {
       alert('保存失败：' + err.message);
-      $('btnSaveAll').textContent = '💾 保存全局配置';
+      $('btnSaveAll').textContent = '保存配置';
       $('btnSaveAll').disabled = false;
     }
   }
@@ -263,22 +329,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     const key = $('modelApiKey').value.trim();
     const model = $('modelName').value.trim();
 
-    const bridgeIsLocal = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i.test(SERVICE_URL);
-    if (!key && !bridgeIsLocal) {
+    const localOpenCodex = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/v1\/chat\/completions\/?$/i.test(url);
+    if (!key && !localOpenCodex) {
       resBox.style.color = '#ef4444';
-      resBox.textContent = '❌ 请先填写 API Key（远程服务必须自带 Key；自托管可留空改用服务端网关）';
+      resBox.textContent = '远程模型必须填写 API Key；本机 OpenCodex 可以留空';
       return;
     }
 
     if (!config.workspaceToken) {
       resBox.style.color = '#ef4444';
-      resBox.textContent = '❌ 请先保存一次全局配置，创建工作区后再测试完整链路';
+      resBox.textContent = '请先保存配置，创建工作区后再测试完整链路';
       return;
     }
 
     const start = Date.now();
     try {
-      const response = await fetch(`${SERVICE_URL}/reply`, {
+      const response = await bridgeFetch(`${SERVICE_URL}/reply`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -300,10 +366,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       resBox.style.color = '#10b981';
-      resBox.textContent = `✅ 完整链路通过！工作区、Bridge 与模型均正常 · ${latency}ms · [${model}]`;
+      resBox.textContent = `完整链路通过！工作区、Bridge 与模型均正常 · ${latency}ms · [${model}]`;
     } catch (e) {
       resBox.style.color = '#ef4444';
-      resBox.textContent = `❌ 连接失败: ${e.message}`;
+      resBox.textContent = `连接失败：${e.message}`;
     }
   });
 
@@ -319,7 +385,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         config.workspaceToken = token;
         await storageSet({ workspaceToken: token });
       }
-      let res = await fetch(`${SERVICE_URL}/knowledge/documents`, {
+      let res = await bridgeFetch(`${SERVICE_URL}/knowledge/documents`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       let data = await res.json();
@@ -327,7 +393,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         token = await registerWorkspace($('workspaceName')?.value.trim() || '新作AI创作工作台');
         config.workspaceToken = token;
         await storageSet({ workspaceToken: token });
-        res = await fetch(`${SERVICE_URL}/knowledge/documents`, {
+        res = await bridgeFetch(`${SERVICE_URL}/knowledge/documents`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         data = await res.json();
@@ -362,7 +428,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           const currentEnabled = btn.dataset.enabled === 'true' || btn.dataset.enabled === '1';
           if (currentEnabled && !confirm('确定软停用该资料？数据会完整保留，随时可恢复。')) return;
 
-          await fetch(`${SERVICE_URL}/knowledge/status`, {
+          await bridgeFetch(`${SERVICE_URL}/knowledge/status`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -411,7 +477,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       try {
-        const res = await fetch(`${SERVICE_URL}/knowledge/upload`, {
+        const res = await bridgeFetch(`${SERVICE_URL}/knowledge/upload`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -444,7 +510,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('btnImportFeishu').textContent = '正在读取飞书...';
 
     try {
-      const res = await fetch(`${SERVICE_URL}/knowledge/feishu`, {
+      const res = await bridgeFetch(`${SERVICE_URL}/knowledge/feishu`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -487,7 +553,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       if (!modelKey) {
         // 纯知识库检索模式（免 API Key 调试）
-        const res = await fetch(`${SERVICE_URL}/knowledge/retrieve`, {
+        const res = await bridgeFetch(`${SERVICE_URL}/knowledge/retrieve`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
           body: JSON.stringify({ query: q })
@@ -518,7 +584,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       // 带模型生成的端到端测试
-      const res = await fetch(`${SERVICE_URL}/reply`, {
+      const res = await bridgeFetch(`${SERVICE_URL}/reply`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -559,19 +625,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     const tbody = $('faqTableBody');
     tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:16px;">正在加载标准问答...</td></tr>';
     try {
-      let token = config.workspaceToken || '';
-      let res = await fetch(`${SERVICE_URL}/knowledge/faq/list`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+   let token = config.workspaceToken || '';
+      let res = await bridgeFetch(`${SERVICE_URL}/knowledge/faq/list`, {
+       headers: { 'Authorization': `Bearer ${token}` }
       });
       let data = await res.json();
       if (res.status === 401 || data.error === 'workspace_token_invalid') {
         token = await registerWorkspace($('workspaceName')?.value.trim() || '新作AI创作工作台');
-        config.workspaceToken = token;
-        await storageSet({ workspaceToken: token });
-        res = await fetch(`${SERVICE_URL}/knowledge/faq/list`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        data = await res.json();
+       config.workspaceToken = token;
+       await storageSet({ workspaceToken: token });
+        res = await bridgeFetch(`${SERVICE_URL}/knowledge/faq/list`, {
+         headers: { 'Authorization': `Bearer ${token}` }
+       });
+       data = await res.json();
       }
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
       if (!data.items || !data.items.length) {
@@ -589,10 +655,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         </tr>
       `).join('');
 
-      document.querySelectorAll('.btn-delete-faq').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          if (!confirm('确定删除此问答对？')) return;
-          await fetch(`${SERVICE_URL}/knowledge/faq/delete`, {
+     document.querySelectorAll('.btn-delete-faq').forEach(btn => {
+       btn.addEventListener('click', async () => {
+         if (!confirm('确定删除此问答对？')) return;
+          await bridgeFetch(`${SERVICE_URL}/knowledge/faq/delete`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken || ''}` },
             body: JSON.stringify({ id: btn.dataset.id })
@@ -614,8 +680,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const kw = $('faqKeywords').value.trim();
     if (!q || !a) return alert('请填写问题与标准回答要点');
 
-    try {
-      const res = await fetch(`${SERVICE_URL}/knowledge/faq/add`, {
+   try {
+      const res = await bridgeFetch(`${SERVICE_URL}/knowledge/faq/add`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken || ''}` },
         body: JSON.stringify({ question: q, answer: a, keywords: kw })
@@ -636,8 +702,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function loadLeads() {
     const tbody = $('leadsTableBody');
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:16px;">正在加载客资列表...</td></tr>';
-    try {
-      const res = await fetch(`${SERVICE_URL}/leads/list`, {
+   try {
+      const res = await bridgeFetch(`${SERVICE_URL}/leads/list`, {
         headers: { 'Authorization': `Bearer ${config.workspaceToken || ''}` }
       });
       const data = await res.json();
@@ -670,8 +736,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!query) { status.textContent = '请先输入笔记链接、ID 或关键词'; return; }
     status.textContent = '正在拉取评论（含搜索解析，约 10~30 秒）...';
     list.innerHTML = '';
-    try {
-      const res = await fetch(`${SERVICE_URL}/comments/list`, {
+   try {
+      const res = await bridgeFetch(`${SERVICE_URL}/comments/list`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken || ''}` },
         body: JSON.stringify({ note: query })
@@ -726,10 +792,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       draftBtn.disabled = true;
       draftBtn.textContent = '生成中…';
       draftBox.style.display = 'block';
-      try {
-        const res = await fetch(`${SERVICE_URL}/reply`, {
+     try {
+        const res = await bridgeFetch(`${SERVICE_URL}/reply`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken}` },
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.workspaceToken}`,
+            'X-Model-Key': $('modelApiKey')?.value.trim() || config.modelApiKey || '',
+            'X-Model-Base-Url': $('modelBaseUrl')?.value.trim() || config.modelBaseUrl || 'http://127.0.0.1:10100/v1/chat/completions',
+            'X-Model-Name': $('modelName')?.value.trim() || config.modelName || 'google-antigravity/gemini-3.7-flash'
+          },
           body: JSON.stringify({
             session_id: `comment:${c.id || Date.now()}`,
             user_name: c.author || '',
@@ -756,7 +828,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function loadTodayReport() {
     if (!config.workspaceToken) return;
     try {
-      const res = await fetch(`${SERVICE_URL}/report/today`, {
+      const res = await bridgeFetch(`${SERVICE_URL}/report/today`, {
         headers: { 'Authorization': `Bearer ${config.workspaceToken}` }
       });
       const data = await res.json();
@@ -779,7 +851,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     status.style.color = '#64748b';
     status.textContent = '正在保存...';
     try {
-      const res = await fetch(`${SERVICE_URL}/tenant/webhook`, {
+      const res = await bridgeFetch(`${SERVICE_URL}/tenant/webhook`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.workspaceToken}` },
         body: JSON.stringify({ url: $('alertWebhook').value.trim() })
@@ -797,12 +869,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('btnExportLeads').addEventListener('click', async () => {
     const button = $('btnExportLeads');
     button.disabled = true;
-    try {
-      const res = await fetch(`${SERVICE_URL}/leads/export.csv`, {
+   try {
+      const res = await bridgeFetch(`${SERVICE_URL}/leads/export.csv`, {
         headers: { 'Authorization': `Bearer ${config.workspaceToken || ''}` }
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
+      const csvText = await res.text();
+      const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -818,13 +891,198 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  const FOLLOWUP_LABELS = {
+    needs_reply: '🔴 待客服回复',
+    card_sent: '已发名片',
+    card_clicked_unconfirmed: '名片已点击，添加未确认',
+    lead_captured: '📋 客户已留资',
+    waiting_reply: '🟡 等待客户中',
+    followup_due: '⏰ 到期需跟进',
+    done: '✅ 已完成 / 已加微',
+    vendor: '📢 平台推销（已免除跟进）',
+    invalid: '🚫 账号异常（已归档）'
+  };
+
+  async function loadFollowupQueue() {
+    const list = $('followupList');
+    const summary = $('followupSummary');
+    const saved = await storageGet(['followupStateMap']);
+    const now = Date.now();
+    const items = Object.values(saved.followupStateMap || {}).filter(item => item && item.sessionId);
+    items.forEach(item => {
+      if (item.category === 'vendor' || item.category === 'invalid') {
+        item.displayStage = item.category;
+      } else if (item.nextFollowupAt && item.nextFollowupAt <= now && Number(item.followupCount || 0) < 2
+          && !['needs_reply', 'lead_captured', 'done', 'vendor', 'invalid'].includes(item.stage)) {
+        item.displayStage = 'followup_due';
+      } else {
+        item.displayStage = item.stage || 'waiting_reply';
+      }
+    });
+    items.sort((a, b) => {
+      const aDue = a.displayStage === 'followup_due' || a.displayStage === 'needs_reply' ? 0 : 1;
+      const bDue = b.displayStage === 'followup_due' || b.displayStage === 'needs_reply' ? 0 : 1;
+      return aDue - bDue || Number(a.nextFollowupAt || Infinity) - Number(b.nextFollowupAt || Infinity);
+    });
+    const dueCount = items.filter(item => ['followup_due', 'needs_reply'].includes(item.displayStage)).length;
+    const prospectCount = items.filter(item => item.category === 'prospect' || item.category === 'lead' || item.category === 'wecom').length;
+    summary.textContent = items.length
+      ? `共记录 ${items.length} 位联系人（${prospectCount} 位高意向/客资客户），当前 ${dueCount} 位需要跟进处理`
+      : '打开小红书客服台后，系统会自动提取联系人对话与意图标签。';
+    list.replaceChildren();
+    items.slice(0, 100).forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'followup-item';
+      const main = document.createElement('div');
+      main.className = 'followup-main';
+      const header = document.createElement('div');
+      header.className = 'followup-header';
+      const name = document.createElement('div');
+      name.className = 'followup-name';
+      name.textContent = item.userName || '未命名客户';
+
+      const catTag = document.createElement('span');
+      catTag.className = `followup-category-tag tag-${item.category || 'general'}`;
+      catTag.textContent = item.categoryLabel || '💬 咨询';
+      header.append(name, catTag);
+
+      const snippet = document.createElement('div');
+      snippet.className = 'followup-snippet';
+      snippet.textContent = item.snippet || '暂无对话摘要';
+      snippet.title = item.snippet || '';
+
+      const meta = document.createElement('div');
+      meta.className = 'followup-meta';
+      if (item.displayStage === 'vendor') {
+        meta.textContent = '小红书官方推销顾问（已自动免除跟进）';
+      } else if (item.displayStage === 'invalid') {
+        meta.textContent = '异常账号（已自动归档）';
+      } else if (item.displayStage === 'done') {
+        meta.textContent = '已标记加微 / 结束跟进';
+      } else if (item.displayStage === 'needs_reply') {
+        meta.textContent = `最新消息：${item.timeText || '刚刚'} · 客户等待回复中`;
+      } else if (item.nextFollowupAt) {
+        meta.textContent = `上次互动：${item.timeText || '今天'} · 下次跟进：${new Date(item.nextFollowupAt).toLocaleString('zh-CN', { hour12: false })}`;
+      } else {
+        meta.textContent = `上次互动：${item.timeText || '今天'} · 等待客户回复中`;
+      }
+      main.append(header, snippet, meta);
+
+      const actions = document.createElement('div');
+      actions.className = 'followup-actions';
+      const tag = document.createElement('span');
+      tag.className = `followup-tag ${item.displayStage === 'followup_due' ? 'due' : ''}`;
+      tag.textContent = FOLLOWUP_LABELS[item.displayStage] || '待判断';
+      actions.append(tag);
+
+      if (item.displayStage !== 'vendor' && item.displayStage !== 'invalid' && item.displayStage !== 'done') {
+        const markBtn = document.createElement('button');
+        markBtn.className = 'btn btn-secondary btn-sm';
+        markBtn.textContent = '标记已加微';
+        markBtn.title = '人工确认已加上企微，移出待办队列';
+        markBtn.addEventListener('click', async () => {
+          const savedMap = (await storageGet(['followupStateMap'])).followupStateMap || {};
+          if (savedMap[item.sessionId]) {
+            savedMap[item.sessionId].stage = 'done';
+            savedMap[item.sessionId].nextFollowupAt = 0;
+            await storageSet({ followupStateMap: savedMap });
+            loadFollowupQueue();
+          }
+        });
+        actions.append(markBtn);
+      }
+      row.append(main, actions);
+      list.append(row);
+    });
+  }
+
+  async function collectHistorySamples() {
+    const tabs = await chrome.tabs.query({});
+    let lastError = '';
+    for (const tab of tabs) {
+      if (!tab.id) continue;
+      try {
+        const result = await chrome.tabs.sendMessage(tab.id, {
+          type: 'COLLECT_HISTORY_SAMPLES', maxSessions: 12, maxTurns: 30
+        });
+        if (result?.ok && Array.isArray(result.sessions) && result.sessions.length) return result.sessions;
+        if (result && !result.ok && result.error) {
+          lastError = result.error;
+        }
+      } catch (_) {
+        // 未注入 content script 的标签页跳过
+      }
+    }
+    throw new Error(lastError || '未连接到小红书客服台。请先刷新已打开的小红书私信页面，并选中一个有聊天记录的会话');
+  }
+
+  async function learnFromHistory() {
+    const button = $('btnLearnHistory');
+    const status = $('learnHistoryStatus');
+    button.disabled = true;
+    status.className = 'learn-state';
+    status.textContent = '正在读取真实会话并提炼你的回复方式…';
+    try {
+      const sessions = await collectHistorySamples();
+      let token = $('workspaceToken').value.trim() || config.workspaceToken || '';
+      const workspaceName = $('workspaceName').value.trim() || '我的工作区';
+      if (!token) {
+        token = await registerWorkspace(workspaceName);
+        $('workspaceToken').value = token;
+        await storageSet({ workspaceToken: token, workspaceName });
+      }
+      const response = await bridgeFetch(`${SERVICE_URL}/tenant/learn-history`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'X-Model-Base-Url': $('modelBaseUrl').value.trim(),
+          'X-Model-Name': $('modelName').value.trim(),
+          'X-Model-Key': $('modelApiKey').value.trim()
+        },
+        body: JSON.stringify({ sessions })
+      });
+      const data = await readJson(response);
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      $('businessProfile').value = data.config?.business_profile || '';
+      $('replyPreferences').value = data.config?.reply_preferences || '';
+      const learnedAt = Date.now();
+      const patch = {
+        workspaceToken: token,
+        businessProfile: $('businessProfile').value,
+        replyPreferences: $('replyPreferences').value,
+        historyLearnedAt: learnedAt,
+        learnedSummary: data.summary || '已学习历史回复',
+        configVersion: learnedAt
+      };
+      await storageSet(patch);
+      config = { ...config, ...patch };
+      status.className = 'learn-state success';
+      status.textContent = `${patch.learnedSummary} · 已自动写入，可继续在下方补充修改`;
+      const tabs = await chrome.tabs.query({});
+      tabs.forEach(tab => tab.id && chrome.tabs.sendMessage(tab.id, { type: 'CONFIG_UPDATED', config: patch }).catch(() => {}));
+    } catch (error) {
+      status.className = 'learn-state error';
+      status.textContent = `学习失败：${error.message}`;
+    } finally {
+      button.disabled = false;
+      button.textContent = config.historyLearnedAt ? '重新学习' : '从历史对话学习';
+    }
+  }
+
+  $('btnLearnHistory').addEventListener('click', learnFromHistory);
+  $('btnRefreshFollowups').addEventListener('click', loadFollowupQueue);
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.followupStateMap) loadFollowupQueue();
+  });
+
   // --- Feedback History ---
   async function loadFeedback() {
     const box = $('feedbackListContainer');
     box.innerHTML = '正在加载实战反馈案例...';
     try {
-      const scope = encodeURIComponent(config.knowledgeScope || 'default');
-      const res = await fetch(`${SERVICE_URL}/feedback/list?scope=${scope}&limit=20`, {
+     const scope = encodeURIComponent(config.knowledgeScope || 'default');
+      const res = await bridgeFetch(`${SERVICE_URL}/feedback/list?scope=${scope}&limit=20`, {
         headers: { 'Authorization': `Bearer ${config.workspaceToken || ''}` }
       });
       const data = await res.json();
@@ -851,4 +1109,46 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   populate();
   checkBridgeHealth();
+  loadOpenCodexModels();
+  syncFromServer();
+
+  async function syncFromServer() {
+    let token = config.workspaceToken || '';
+    if (!token) {
+      try {
+        token = await registerWorkspace(config.workspaceName || '我的工作区');
+        config.workspaceToken = token;
+        $('workspaceToken').value = token;
+        await storageSet({ workspaceToken: token });
+      } catch (_) {}
+    }
+    if (!token) return;
+    try {
+      const res = await bridgeFetch(SERVICE_URL + '/tenant/config', {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      const data = await readJson(res);
+      if (data.ok && data.config) {
+        const s = data.config;
+        if (s.business_profile) {
+          $('businessProfile').value = s.business_profile;
+          config.businessProfile = s.business_profile;
+        }
+        if (s.reply_preferences) {
+          $('replyPreferences').value = s.reply_preferences;
+          config.replyPreferences = s.reply_preferences;
+        }
+        if (s.brand_name) {
+          $('brandName').value = s.brand_name;
+          config.brandName = s.brand_name;
+        }
+        await storageSet({
+          businessProfile: $('businessProfile').value,
+          replyPreferences: $('replyPreferences').value,
+          brandName: $('brandName').value
+        });
+      }
+    } catch (_) {}
+    loadTodayReport();
+  }
 });

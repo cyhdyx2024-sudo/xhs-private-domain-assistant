@@ -64,6 +64,45 @@ def _last_substantive_customer_message(turns: list, latest_msg: str) -> str:
     return ""
 
 
+def _looks_like_contact_value(latest_msg: str) -> bool:
+    latest = clean_analysis_text(latest_msg, 100)
+    return bool(
+        re.fullmatch(r"(?:1[3-9]\d{9}|[a-zA-Z][a-zA-Z0-9_-]{5,19})", latest)
+        or re.fullmatch(
+            r"(?:(?:微信号?|vx|wx|手机号|手机|电话)\s*[:：]?\s*)"
+            r"(?:1[3-9]\d{9}|[a-zA-Z][a-zA-Z0-9_-]{5,19})",
+            latest,
+            re.I,
+        )
+    )
+
+
+def _customer_just_provided_contact(latest_msg: str, turns: list) -> bool:
+    latest = clean_analysis_text(latest_msg, 100)
+    if not _looks_like_contact_value(latest):
+        return False
+    recent_assistant = " ".join(
+        str(turn.get("content") or "") for turn in turns[-4:] if turn.get("role") == "assistant"
+    )
+    return bool(_asks_for_contact(recent_assistant) or re.search(r"微信|手机|电话|vx|wx", latest, re.I))
+
+
+def post_model_safety_fallback(latest_msg: str, turns: list, action: str = "reply") -> str:
+    """模型输出连续未通过质检后，返回可核验的最小兜底。"""
+    latest = clean_analysis_text(latest_msg, 100)
+    if action == "manual_followup":
+        return "哈喽，之前聊到的电脑端体验，这几天方便的话发您链接先跑跑看效果～"
+    if _customer_just_provided_contact(latest, turns):
+        return "收到"
+    if _is_external_action_status_check(latest):
+        return "我这边暂时看不到添加状态 你那边现在有收到申请吗？"
+    if any("对方已点击你的企业微信联系卡" in str(t.get("content") or "") for t in turns):
+        return "看到你点开名片了 如果没跳转成功跟我说一声就行"
+    if _looks_like_contact_value(latest):
+        return "这是你的账号吗 还是想咨询其他问题？"
+    return ""
+
+
 def apply_conversation_guard(latest_msg: str, turns: list, reply: str) -> str:
     """把最容易暴露模板味的两类结果拦下来：短促探问被强行销售、以及重复索要联系方式。"""
     current = clean_analysis_text(reply, 180)
@@ -88,7 +127,7 @@ def apply_conversation_guard(latest_msg: str, turns: list, reply: str) -> str:
     return current
 
 
-def reply_quality_issues(latest_msg: str, turns: list, reply: str) -> list[str]:
+def reply_quality_issues(latest_msg: str, turns: list, reply: str, action: str = "reply") -> list[str]:
     """只判定失败原因，不用固定模板覆盖模型结果。"""
     current = clean_analysis_text(reply, 220)
     latest = clean_analysis_text(latest_msg, 100)
@@ -102,25 +141,36 @@ def reply_quality_issues(latest_msg: str, turns: list, reply: str) -> list[str]:
         _asks_for_contact(current) or len(current) > 105 or re.search(r"内测|专属邀请码|行业模板|我们为您", current)
     ):
         issues.append("客户只是短促确认在线，不应突然推销或索要联系方式")
-    if _asks_for_contact(recent_assistant) and not _has_contact_intent(latest) and _asks_for_contact(current):
+    if action != "manual_followup" and _asks_for_contact(recent_assistant) and not _has_contact_intent(latest) and _asks_for_contact(current):
         issues.append("客服上一轮已索要联系方式，本轮重复索要")
-    if re.search(r"微信(?:是|号)?[:：s]*[a-zA-Z0-9_-]{5,}|手机(?:是|号)?[:：s]*1[3-9]d{9}", latest):
+    if re.search(r"微信(?:是|号)?[:：\s]*[a-zA-Z0-9_-]{5,}|手机(?:是|号)?[:：\s]*1[3-9]\d{9}", latest):
         if _asks_for_contact(current):
             issues.append("客户已经提供了联系方式，不应再次索要")
+    if any("对方已点击你的企业微信联系卡" in str(t.get("content") or "") for t in turns):
+        if _asks_for_contact(current):
+            issues.append("客户已点击企业微信名片，不应再次索要联系方式")
+    if _customer_just_provided_contact(latest, turns) and (len(current) > 16 or "？" in current or "?" in current):
+        issues.append("客户刚提供联系方式，本轮只需简短确认收到，不应立刻连问业务问题")
+    if _looks_like_contact_value(latest) and not _customer_just_provided_contact(latest, turns):
+        if re.search(r"收到|记下|微信号|联系方式", current):
+            issues.append("缺少联系方式语境，不能把孤立字母数字串擅自当成微信号")
     if _is_external_action_status_check(latest):
         if re.search(r"实际效果|操作流程|了解(?:一下)?|产品介绍|怎么用", current):
             issues.append("客户在确认外部动作状态，回复却把话题岔到产品介绍")
+        if not re.search(r"看不到.{0,6}状态|无法.{0,6}(?:查看|确认)|不能.{0,6}(?:查看|确认)|当前会话.{0,10}(?:看不到|无法)", current):
+            issues.append("客户在确认外部动作状态，回复没有诚实说明当前无法查看状态")
         if re.search(
-            r"(?:已经?|刚刚?|正在|这就)(?:[^。！？\n]{0,10})?(?:发送|发出|添加|加好|通过|处理|提交|申请|搜索)"
+            r"(?:已经?|刚刚?|正在|这就)(?:[^。！？\n]{0,10})?(?:发送|发出|添加|加好|通过|处理|提交|申请|搜(?:索)?)"
             r"|加好了|发好了|提交了好友申请|通过了好友申请",
             current,
         ) and not re.search(r"无法确认|不能确认|暂时看不到|需要核对|还没法|尚未", current):
             issues.append("当前会话无法核验外部动作状态，回复却声称已经完成")
     if re.search(
-        r"(?:我|这边)?(?:这就|马上|稍后|待会儿?|现在|回头).{0,10}(?:添加|加|发送|发|通过|处理|提交|申请|标记|记录)|"
-        r"(?:我|这边)?帮您?.{0,6}(?:添加|加|发送|发|通过|标记|提交)(?:一下)?(?:申请|好友|资料|链接)?",
+        r"(?:我|这边)?(?:这就|马上|稍后|待会儿?|现在|回头|正在|刚刚?).{0,10}(?:添加|加|发送|发|通过|处理|提交|申请|标记|记录|搜(?:索)?)|"
+        r"(?:我|这边).{0,8}(?:核对|确认|查|看)(?:一下|下)?|"
+        r"(?:我|这边)?帮您?.{0,6}(?:添加|加|发送|发|通过|标记|提交|搜(?:索)?)(?:一下)?(?:申请|好友|资料|链接)?",
         current,
-    ) and not re.search(r"无法|不能|暂时.{0,4}(?:操作|确认)|需要人工|转人工|您可以|收到|已记下|已收到", current):
+    ) and not re.search(r"无法|不能|暂时.{0,4}(?:操作|确认)|需要人工|转人工|您可以", current):
         issues.append("回复承诺执行当前会话无法核验的外部动作")
     if re.search(r"多少钱|价格|怎么收费|收费吗|费用", latest_msg) and re.search(r"\d[\d,.]*\s*(?:元|块)|每月|每年|起", current):
         issues.append("业务资料没有给出实时价格，回复却自行报价")

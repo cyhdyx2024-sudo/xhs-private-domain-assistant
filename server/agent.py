@@ -17,11 +17,64 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from db import *  # noqa: F401,F403
-from gateway import *  # noqa: F401,F403
-from rag import *  # noqa: F401,F403
-from safety import *  # noqa: F401,F403
-from safety import _is_external_action_status_check
+from db import (
+    add_tenant_faq,
+    alert_worker,
+    clean_analysis_text,
+    clear_tenant_leads,
+    delete_feedback,
+    delete_tenant_faq,
+    delete_tenant_lead,
+    feedback_scope_stats,
+    get_tenant_by_token,
+    get_tenant_webhook,
+    init_feedback_db,
+    list_feedback,
+    list_tenant_faqs,
+    list_tenant_leads,
+    log_reply,
+    record_explicit_tenant_lead,
+    record_tenant_lead,
+    register_tenant,
+    retrieve_faq_matches,
+    retrieve_feedback_examples,
+    rotate_tenant_token,
+    save_feedback,
+    sanitize_history_samples,
+    set_feedback_enabled,
+    set_tenant_webhook,
+    tenant_leads_csv,
+    tenant_scope,
+    today_stats,
+    update_tenant,
+)
+from gateway import (
+    OPENCODEX_API_KEY,
+    OPENCODEX_MODEL,
+    OPENCODEX_URL,
+    OWNER_DEFAULTS,
+    PRODUCT_MODE,
+    build_system_prompt,
+    learn_tenant_history,
+    request_model,
+    resolve_model_config,
+)
+from rag import (
+    extract_uploaded_text,
+    import_feishu_doc,
+    ingest_knowledge_document,
+    list_knowledge_documents,
+    resolve_embedding_config,
+    retrieve_knowledge_chunks,
+    set_knowledge_document_enabled,
+)
+from safety import (
+    _is_external_action_status_check,
+    compliance_flags,
+    post_model_safety_fallback,
+    reply_quality_issues,
+    rewrite_failed_reply,
+)
 
 # 评论区雷达依赖本机 xhs CLI（xiaohongshu-cli，逆向签名接口）。
 # 路径可用 XHS_CLI_BIN 覆盖；CLI 需已通过 `xhs login` 登录。
@@ -99,6 +152,37 @@ REGISTER_HITS: dict[str, list[float]] = {}
 
 
 
+def format_relative_time(timestamp: int | float | None, now_ts: int | float | None = None) -> str:
+    if not timestamp:
+        return ""
+    now_ts = now_ts or time.time() * 1000
+    diff_sec = max(0, int((float(now_ts) - float(timestamp)) / 1000))
+    if diff_sec < 60:
+        return "刚刚"
+    if diff_sec < 3600:
+        return f"{diff_sec // 60}分钟前"
+    if diff_sec < 86400:
+        return f"{diff_sec // 3600}小时前"
+    return f"{diff_sec // 86400}天前"
+
+
+def parse_card_directive(reply: str, latest_msg: str = "", turns: list | None = None) -> tuple[str, str | None]:
+    send_card = None
+    cleaned = str(reply or "").strip()
+    if "[SEND_CARD:WECOM]" in cleaned or "【发企微名片】" in cleaned:
+        send_card = "wecom"
+        cleaned = re.sub(r"\[SEND_CARD:WECOM\]|【发企微名片】", "", cleaned).strip()
+    elif "[SEND_CARD:LEAD]" in cleaned or "【发留资卡】" in cleaned:
+        send_card = "lead"
+        cleaned = re.sub(r"\[SEND_CARD:LEAD\]|【发留资卡】", "", cleaned).strip()
+    elif re.search(r"怎么加|发(?:个|下|我)?(?:微信号?|联系方式)|加(?:个)?(?:微信|微|好友)|(?:微信号?|联系方式)是多少|有没有(?:微信|联系方式)|发我名片|名片发我", str(latest_msg or "")):
+        # 客户主动索要微信/联系方式时，自动触发推送企微名片
+        send_card = "wecom"
+        if re.search(r"你把微信号发我|留个微信|发我一下微信|直接发我微信号|发我微信号", cleaned):
+            cleaned = "好的 微信随时沟通 我把企微名片发在下方啦"
+    return cleaned, send_card
+
+
 def call_llm_dynamic(
     user_name: str,
     latest_msg: str,
@@ -114,13 +198,30 @@ def call_llm_dynamic(
     fallback_text: str = "",
     temperature: float = 0.55,
 ) -> tuple[str, int, list[dict]]:
+    now_ts = time.time() * 1000
     context_lines = []
-    for turn in turns[-12:]:
-        role = "客服" if turn.get("role") == "assistant" else "客户"
-        kind = "（分享卡片）" if turn.get("type") == "card" else ""
+    latest_user_ts = 0
+    wecom_card_clicked = False
+
+    for turn in turns[-14:]:
+        role = turn.get("role")
+        if role == "assistant":
+            role_label = "客服"
+        elif role == "system":
+            role_label = "系统通知"
+        else:
+            role_label = "客户"
+        kind = "（企微名片/卡片）" if turn.get("type") == "card" else ""
         content = str(turn.get("content") or "").strip()
+        ts = turn.get("timestamp")
+        rel_time = format_relative_time(ts, now_ts) if ts else ""
+        time_tag = f"[{rel_time}] " if rel_time else ""
+        if "对方已点击你的企业微信联系卡" in content or "对方已保存你的名片" in content:
+            wecom_card_clicked = True
+        if role == "user" and ts:
+            latest_user_ts = max(latest_user_ts, float(ts))
         if content:
-            context_lines.append(f"{role}{kind}：{content}")
+            context_lines.append(f"{time_tag}{role_label}{kind}：{content}")
 
     # 兼容旧版扩展，但新版优先使用按时间排序的 turns。
     if not context_lines:
@@ -145,6 +246,30 @@ def call_llm_dynamic(
             " 客户正在追问添加、发送、申请或通过等外部动作状态。当前会话不能证明动作是否完成；"
             "不得谎称已完成，也不得转去介绍产品。应明确需要核对，并给出一个最低摩擦的确认动作。"
         )
+
+    shared_user_cards = [clean_analysis_text(t.get("content") or "", 100) for t in turns if t.get("type") == "card" and t.get("role") == "user"]
+    if shared_user_cards:
+        card_titles = "、".join(f"《{c.splitlines()[0]}》" for c in shared_user_cards if c)
+        action_note += (
+            f"\n【重要背景：客户在前文已分享过笔记/对标卡片：{card_titles}】。"
+            "若客户询问是否适合其业务、能不能做这种形式或提到发了相关账号：严禁让客户重复截图或再次发送！"
+            "必须明确引用客户发出的笔记主题，直接正面确认新作2.0完全支持这种3:4图文排版，并顺势引导留微信开通电脑端体验通道。"
+        )
+
+    time_strategy_note = ""
+    if latest_user_ts:
+        gap_sec = int((now_ts - latest_user_ts) / 1000)
+        if gap_sec < 600:
+            time_strategy_note = "\n【当前处于即时互动期（客户 <10分钟前 刚发送）】：客户当前大概率在线，回复极简、口语化空格断句，直接推进，切忌长篇大论。"
+        elif gap_sec < 86400:
+            time_strategy_note = f"\n【当前属于日内跟进（距离客户消息已过去 {gap_sec // 3600} 小时）】：自然承接，不刻意道歉，直接给出一句话回应。"
+        else:
+            days = max(1, gap_sec // 86400)
+            time_strategy_note = f"\n【当前属于跨天/沉睡唤醒（距离客户消息已过去 {days} 天）】：客户可能已淡忘当时语境，首句需轻量唤醒主题（如“之前聊到的那个…”、“上次您问的…”），不可当成刚刚在聊。"
+
+    if wecom_card_clicked:
+        time_strategy_note += "\n【重点：客户刚点击了企业微信联系卡】：客户已在企微端发起连接，绝不要再问客户要微信号或手机号！回复确认收到，并在企微及时通过/发送资料。"
+
     examples = retrieve_feedback_examples(latest_msg, turns, knowledge_scope)
     memory_lines = []
     for index, example in enumerate(examples, 1):
@@ -160,18 +285,11 @@ def call_llm_dynamic(
         f"资料{index}｜{item['title']}（v{item['version']}）｜{item['content']}"
         for index, item in enumerate(knowledge_hits, 1)
     ) or "当前问题没有命中已启用的业务资料"
-    style_hints = [
-        "语气像正在跟进项目的真人，先短回应，再问一个关键问题。",
-        "语气克制、自然，少用完整宣传句，像微信里认真沟通。",
-        "先接住客户顾虑，不急着成交；用一两个具体词证明你看过上下文。",
-        "尽量用短句和口语，但信息要具体，避免寒暄和套话。",
-    ]
-    style_hint = style_hints[int(hashlib.sha256(f"{knowledge_scope}:{latest_msg}".encode()).hexdigest(), 16) % len(style_hints)]
     user_prompt = (
         f"客户昵称：{user_name}\n"
         f"客户最后一条消息：{latest_msg}\n"
         f"任务：{action_note}\n\n"
-        "表达风格提示：" + style_hint + "\n\n"
+        f"{time_strategy_note}\n\n"
         "按时间顺序的真实会话：\n" + "\n".join(context_lines) +
         "\n\n命中的业务知识（这是回答业务事实的首要依据；未命中时不得自行补全）：\n" + knowledge_context +
         "\n\n相似人工优质案例（只学习策略和表达，不得照抄；其中价格、功能、身份均不能当作当前事实）：\n" + memory_context
@@ -273,6 +391,7 @@ class HttpHandler(BaseHTTPRequestHandler):
         origin = self._cors_origin()
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Private-Network", "true")
             self.send_header("Vary", "Origin")
 
     def do_OPTIONS(self) -> None:
@@ -280,6 +399,7 @@ class HttpHandler(BaseHTTPRequestHandler):
         self._send_cors()
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Model-Key, X-Model-Base-Url, X-Model-Name, X-Embedding-Key, X-Embedding-Base-Url, X-Embedding-Model, X-Feishu-App-Id, X-Feishu-App-Secret")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -383,7 +503,7 @@ class HttpHandler(BaseHTTPRequestHandler):
             self._send_json(201, {"ok": True, **result})
             return
 
-        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/tenant/webhook", "/comments/list", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/knowledge/retrieve", "/leads/delete", "/leads/clear"}:
+        if path in {"/reply", "/feedback", "/feedback/delete", "/feedback/status", "/tenant/config", "/tenant/learn-history", "/tenant/webhook", "/comments/list", "/knowledge/upload", "/knowledge/feishu", "/knowledge/status", "/knowledge/faq/add", "/knowledge/faq/delete", "/knowledge/retrieve", "/leads/capture", "/leads/delete", "/leads/clear"}:
             tenant = self._tenant()
             if PRODUCT_MODE and not tenant:
                 return
@@ -393,6 +513,23 @@ class HttpHandler(BaseHTTPRequestHandler):
                 self._send_json(413, {"ok": False, "error": "request_too_large"})
                 return
             scope = tenant_scope(tenant, payload.get("knowledge_scope") or "default")
+
+            if path == "/leads/capture":
+                if not tenant:
+                    self._send_json(401, {"ok": False, "error": "tenant_required"})
+                    return
+                try:
+                    created = record_explicit_tenant_lead(
+                        tenant["id"], str(payload.get("session_id") or ""),
+                        str(payload.get("user_name") or "客户"), str(payload.get("lead_type") or ""),
+                        str(payload.get("lead_value") or ""), str(payload.get("context_summary") or ""),
+                        lead_timestamp=payload.get("lead_timestamp"),
+                    )
+                except ValueError as error:
+                    self._send_json(400, {"ok": False, "error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "created": created})
+                return
 
             if path == "/knowledge/retrieve":
                 query = str(payload.get("query") or "").strip()
@@ -445,6 +582,27 @@ class HttpHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"ok": False, "error": "tenant_required"})
                     return
                 self._send_json(200, {"ok": True, "config": update_tenant(tenant["id"], payload)})
+                return
+
+            if path == "/tenant/learn-history":
+                if not tenant:
+                    self._send_json(400, {"ok": False, "error": "tenant_required"})
+                    return
+                try:
+                    model_config = resolve_model_config(self.headers)
+                    sessions, sample_stats = sanitize_history_samples(payload.get("sessions"))
+                    config, summary = learn_tenant_history(tenant, sessions, model_config)
+                except ValueError as error:
+                    self._send_json(400, {"ok": False, "error": str(error)})
+                    return
+                except Exception as error:
+                    print(f"[History Learning Error] {error}")
+                    self._send_json(500, {"ok": False, "error": "history_learning_failed"})
+                    return
+                self._send_json(200, {
+                    "ok": True, "config": config, "summary": summary,
+                    "sample_stats": sample_stats,
+                })
                 return
 
             if path == "/tenant/webhook":
@@ -555,10 +713,12 @@ class HttpHandler(BaseHTTPRequestHandler):
             # 自动捕获客资并入库（永不漏单）
             if tenant:
                 sid = str(payload.get("session_id") or "")
-                record_tenant_lead(tenant["id"], sid, user_name, latest_msg)
+                lead_ts = payload.get("lead_timestamp")
+                record_tenant_lead(tenant["id"], sid, user_name, latest_msg, lead_timestamp=lead_ts)
                 for t in turns:
                     if isinstance(t, dict) and t.get("role") == "user":
-                        record_tenant_lead(tenant["id"], sid, user_name, str(t.get("content") or ""))
+                        t_ts = t.get("timestamp")
+                        record_tenant_lead(tenant["id"], sid, user_name, str(t.get("content") or ""), lead_timestamp=t_ts)
             user_msgs = payload.get("user_messages") or []
             bot_msgs = payload.get("bot_messages") or []
             shared_cards = payload.get("shared_cards") or []
@@ -589,28 +749,41 @@ class HttpHandler(BaseHTTPRequestHandler):
                 knowledge_scope, tenant=tenant, model_config=model_config, embedding_config=embedding_config,
                 fallback_text=str(payload.get("fallback_text") or ""), temperature=temperature,
             )
-            quality_issues = reply_quality_issues(latest_msg, turns, llm_reply)
+            quality_issues = reply_quality_issues(latest_msg, turns, llm_reply, action)
             if quality_issues:
                 llm_reply = rewrite_failed_reply(latest_msg, turns, llm_reply, quality_issues, tenant, model_config)
+
+            used_safety_fallback = False
+            if not llm_reply and action != "comment_reply":
+                # 模型已读取完整上下文但两次输出都未通过安全质检时，才使用最小兜底；
+                # 兜底不能代替模型做意图识别，更不能绕过 BYOK 配置。
+                llm_reply = post_model_safety_fallback(latest_msg, turns, action)
+                used_safety_fallback = bool(llm_reply)
 
             if not llm_reply:
                 # 全自动场景宁可不发，也不能用无上下文模板误伤真实客户。
                 self._send_json(503, {"ok": False, "error": "llm_unavailable"})
                 return
 
+            clean_reply, send_card = parse_card_directive(llm_reply, latest_msg, turns)
+
             log_reply(
                 tenant["id"] if tenant else "", str(payload.get("session_id") or ""),
-                user_name, latest_msg, llm_reply, action, int((time.monotonic() - request_started) * 1000),
+                user_name, latest_msg, clean_reply, action, int((time.monotonic() - request_started) * 1000),
             )
 
             self._send_json(200, {
                 "ok": True,
-                "reply": llm_reply,
-                "engine": f"{model_config['model']} / OpenAI-compatible",
+                "reply": clean_reply,
+                "send_card": send_card,
+                "engine": (
+                    f"{model_config['model']} / OpenAI-compatible"
+                    + (" + safety fallback" if used_safety_fallback else "")
+                ),
                 "memory_hits": memory_hits,
                 "knowledge_scope": knowledge_scope,
                 "knowledge_sources": knowledge_sources,
-                "compliance_flags": compliance_flags(llm_reply),
+                "compliance_flags": compliance_flags(clean_reply),
             })
         else:
             self.send_response(404)

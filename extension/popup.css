@@ -75,6 +75,9 @@ input:checked + .slider:before { transform: translateX(20px); }
 }
 .btn-primary { background: #ff2442; color: #fff; }
 .btn-primary:hover { background: #e01b38; }
+.btn-lead { background: #fff1f2; color: #e11d48; border: 1px solid #fecdd3; }
+.btn-lead:hover { background: #ffe4e6; }
+.btn:disabled { cursor: wait; opacity: .65; }
 .btn-secondary { background: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; }
 .btn-secondary:hover { background: #e2e8f0; }
 

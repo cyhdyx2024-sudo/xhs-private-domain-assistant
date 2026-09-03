@@ -39,6 +39,18 @@ class FeedbackKnowledgeBaseTest(unittest.TestCase):
         self.assertIsNone(agent.get_tenant_by_token(created["access_token"]))
         self.assertEqual(agent.get_tenant_by_token(rotated["access_token"])["id"], created["tenant_id"])
 
+    def test_today_stats_keeps_recent_intents_inside_tenant(self) -> None:
+        first = agent.register_tenant("first")
+        second = agent.register_tenant("second")
+        agent.log_reply(first["tenant_id"], "s1", "甲", "多少钱", "回复", "reply", 10)
+        agent.log_reply(second["tenant_id"], "s2", "乙", "这个功能怎么用", "回复", "reply", 20)
+
+        first_stats = agent.today_stats({"id": first["tenant_id"]})
+        second_stats = agent.today_stats({"id": second["tenant_id"]})
+
+        self.assertEqual(first_stats["top_intents"], [{"intent": "price", "count": 1}])
+        self.assertEqual(second_stats["top_intents"], [{"intent": "feature", "count": 1}])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,8 @@
     }
   },
   "permissions": [
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "*://creator.xiaohongshu.com/*",
@@ -32,8 +33,11 @@
     "*://qianfan.xiaohongshu.com/*",
     "*://www.xiaohongshu.com/*",
     "*://edith.xiaohongshu.com/*",
+    "http://127.0.0.1:*/*",
+    "http://localhost:*/*",
     "http://127.0.0.1/*",
-    "http://localhost/*"
+    "http://localhost/*",
+    "https://*.xinzuoai.com/*"
   ],
   "content_scripts": [
     {

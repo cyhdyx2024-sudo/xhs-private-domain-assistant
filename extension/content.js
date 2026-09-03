@@ -9,14 +9,15 @@
   const VERSION = '1.1.0';
   const Safety = globalThis.XhsSafety;
   const DEFAULTS = {
-    enabled: false, onboardingComplete: false, runMode: 'copilot', timeScope: 'all_day', fullAutoArmedAt: 0, operatorAway: false,
+    enabled: true, onboardingComplete: true, runMode: 'copilot', timeScope: 'all_day', fullAutoArmedAt: 0, operatorAway: false,
     cooldownMinutes: 30, maxRepliesPerHour: 12, autoReplyMaxAgeMinutes: 120,
     repliedCount: 0, leadsCount: 0, statsDate: '', contactBlacklist: [],
-    processedMap: {}, hourlySendTimestamps: [], uncertainSendMap: {},
+    processedMap: {}, hourlySendTimestamps: [], uncertainSendMap: {}, followupStateMap: {},
     bridgeUrl: 'http://127.0.0.1:18195', workspaceToken: '', accountId: '', operatorNickname: '',
-    knowledgeScope: 'default', modelBaseUrl: '',
+    knowledgeScope: 'default',
     modelBaseUrl: 'http://127.0.0.1:10100/v1/chat/completions',
     modelName: 'google-antigravity/gemini-3.7-flash',
+    configVersion: 0,
     modelApiKey: '', embeddingBaseUrl: '', embeddingModel: '', embeddingApiKey: '',
     feishuAppId: '', feishuAppSecret: '',
     monitor: { lastLlmAt: 0, lastLlmLatencyMs: 0, llmSuccessCount: 0, llmFailureCount: 0,
@@ -43,20 +44,379 @@
   const feedbackCandidates = new Map();
   let lastVirtualSweepAt = 0;
   let lastComplianceFlags = [];
+  let lastSendCardDirective = null;
+  let leadSyncRunning = false;
 
   const draftCache = new Map();
   const manualDraftCache = new Map();
+  const userClearedSignatures = new Map();
+  const copilotAttemptedSignatures = new Set();
   const inFlightSignatures = new Set();
   const messageRetryUntil = new Map();
   const contactRetryUntil = new Map();
+  const leadRetryUntil = new Map();
   const signatureFailureCounts = new Map();
+  const capturedLeadKeys = new Set();
   const scanSeenIds = new Set();
   let globalCircuitUntil = 0;
   let scanPassStartedAt = Date.now();
+  const PERSISTENT_DRAFT_KEY = 'persistentDraftCache';
+  const PERSISTENT_DRAFT_MAX = 100;
+  const PERSISTENT_DRAFT_TTL = 7 * 24 * 60 * 60 * 1000;
+  let persistentDraftStore = {};
+  const visitedHistorySamples = new Map();
+  const HISTORY_SAMPLES_MAX_SESSIONS = 12;
+  const HISTORY_SAMPLES_MAX_TURNS = 30;
+  const HISTORY_SAMPLES_MAX_CHARS = 30000;
   const storageGet = keys => new Promise(resolve => chrome.storage.local.get(keys, resolve));
   const storageSet = values => new Promise(resolve => chrome.storage.local.set(values, resolve));
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
+
+  async function bridgeFetch(url, options = {}) {
+    try {
+      const response = await fetch(url, options);
+      return response;
+    } catch (directErr) {
+      // 当从 HTTPS 页面直接 fetch HTTP 127.0.0.1 触发混合内容拦截时，无缝通过 background service worker 转发
+      return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({
+          type: 'BRIDGE_FETCH',
+          url,
+          options: {
+            method: options.method || 'GET',
+            headers: options.headers || {},
+            body: options.body || undefined
+          }
+        }, res => {
+          if (chrome.runtime.lastError) {
+            return reject(new Error(chrome.runtime.lastError.message || directErr.message));
+          }
+          if (!res) return reject(directErr);
+          const pseudoResponse = {
+            ok: Boolean(res.ok),
+            status: Number(res.status || 0),
+            statusText: String(res.statusText || ''),
+            json: async () => (res.data !== null ? res.data : JSON.parse(res.text || '{}')),
+            text: async () => String(res.text || '')
+          };
+          resolve(pseudoResponse);
+        });
+      });
+    }
+  }
+
+  function stableScopeHash(value) {
+    let hash = 2166136261;
+    for (const char of String(value || '')) {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function getTenantCacheScope() {
+    const workspaceIdentity = state.workspaceToken || `${state.accountId}:${state.knowledgeScope}`;
+    return `${getKnowledgeScope()}:tenant:${stableScopeHash(workspaceIdentity)}`;
+  }
+
+  function makePersistentDraftKey(tenantScope, sessionId, signature, action, configVersion) {
+    return [tenantScope, sessionId, signature, action, String(configVersion || 0)].join('||');
+  }
+
+  async function loadPersistentDraftCache() {
+    const saved = await storageGet([PERSISTENT_DRAFT_KEY]);
+    persistentDraftStore = saved[PERSISTENT_DRAFT_KEY] || {};
+    const now = Date.now();
+    const valid = Object.entries(persistentDraftStore)
+      .filter(([, entry]) => entry && now - Number(entry.updatedAt || 0) <= PERSISTENT_DRAFT_TTL)
+      .sort((a, b) => Number(b[1].updatedAt || 0) - Number(a[1].updatedAt || 0))
+      .slice(0, PERSISTENT_DRAFT_MAX);
+    const next = Object.fromEntries(valid);
+    if (Object.keys(next).length !== Object.keys(persistentDraftStore).length) {
+      persistentDraftStore = next;
+      await storageSet({ [PERSISTENT_DRAFT_KEY]: persistentDraftStore });
+    }
+  }
+
+  async function savePersistentDraft(session, history, action, reply) {
+    const tenantScope = getTenantCacheScope();
+    const configVersion = state.configVersion || 0;
+    const key = makePersistentDraftKey(tenantScope, session.id, history.signature, action, configVersion);
+    persistentDraftStore[key] = {
+      tenantScope, sessionId: session.id, signature: history.signature,
+      action, configVersion, reply, updatedAt: Date.now()
+    };
+    persistentDraftStore = Object.fromEntries(
+      Object.entries(persistentDraftStore)
+        .sort((a, b) => Number(b[1].updatedAt || 0) - Number(a[1].updatedAt || 0))
+        .slice(0, PERSISTENT_DRAFT_MAX)
+    );
+    await storageSet({ [PERSISTENT_DRAFT_KEY]: persistentDraftStore });
+  }
+
+  function lookupPersistentDraft(session, history, action) {
+    const tenantScope = getTenantCacheScope();
+    const configVersion = state.configVersion || 0;
+    const key = makePersistentDraftKey(tenantScope, session.id, history.signature, action, configVersion);
+    const entry = persistentDraftStore[key];
+    if (!entry || Date.now() - Number(entry.updatedAt || 0) > PERSISTENT_DRAFT_TTL) return null;
+    return entry;
+  }
+
+  async function clearPersistentDraftsForSession(sessionId) {
+    const tenantScope = getTenantCacheScope();
+    const before = Object.keys(persistentDraftStore).length;
+    persistentDraftStore = Object.fromEntries(Object.entries(persistentDraftStore).filter(([, entry]) => (
+      entry?.tenantScope !== tenantScope || entry?.sessionId !== sessionId
+    )));
+    if (Object.keys(persistentDraftStore).length !== before) {
+      await storageSet({ [PERSISTENT_DRAFT_KEY]: persistentDraftStore });
+    }
+  }
+
+  function rememberHistorySample(session, history) {
+    if (!session?.id || !history?.turns?.length) return;
+    const turns = history.turns
+      .filter(turn => turn.role === 'user' || turn.role === 'assistant')
+      .slice(-HISTORY_SAMPLES_MAX_TURNS)
+      .map(turn => ({
+        role: turn.role,
+        content: cleanText(turn.content).slice(0, 1200),
+        type: turn.type === 'card' ? 'card' : 'text',
+        timestamp: Number(turn.timestamp || 0)
+      }));
+    if (!turns.some(turn => turn.role === 'assistant')) return;
+    visitedHistorySamples.delete(session.id);
+    visitedHistorySamples.set(session.id, {
+      session_id: session.id, user_name: session.name || '客户', turns, updatedAt: Date.now()
+    });
+    while (visitedHistorySamples.size > HISTORY_SAMPLES_MAX_SESSIONS) {
+      visitedHistorySamples.delete(visitedHistorySamples.keys().next().value);
+    }
+  }
+
+  function collectHistorySamples(maxSessions = 12, maxTurns = 30) {
+    const active = getActiveSession();
+    if (active?.id) {
+      rememberHistorySample(active, parseConversationHistory(active));
+    }
+    const sessions = [];
+    let totalChars = 0;
+    const cappedSessions = Math.min(HISTORY_SAMPLES_MAX_SESSIONS, Math.max(1, Number(maxSessions) || 12));
+    const cappedTurns = Math.min(HISTORY_SAMPLES_MAX_TURNS, Math.max(1, Number(maxTurns) || 30));
+    for (const sample of Array.from(visitedHistorySamples.values()).reverse().slice(0, cappedSessions)) {
+      const turns = [];
+      for (const turn of sample.turns.slice(-cappedTurns)) {
+        const remaining = HISTORY_SAMPLES_MAX_CHARS - totalChars;
+        if (remaining <= 0) break;
+        const content = cleanText(turn.content).slice(0, remaining);
+        if (!content) continue;
+        turns.push({ ...turn, content });
+        totalChars += content.length;
+      }
+      if (turns.some(turn => turn.role === 'assistant')) {
+        sessions.push({ session_id: sample.session_id, user_name: sample.user_name, turns });
+      }
+      if (totalChars >= HISTORY_SAMPLES_MAX_CHARS) break;
+    }
+    return sessions.length
+      ? { ok: true, sessions, totalChars }
+      : { ok: false, error: '当前会话未检测到客服回复记录。请在左侧点击一个已有往来消息的客户会话后重试' };
+  }
+
+  function classifyCustomerIntent(userName, turns, cardText = '') {
+    const combined = (userName + ' ' + cardText + ' ' + (turns || []).map(t => t.content).join(' ')).toLowerCase();
+    if (/注销|异常|限制登录|违规信息|长按消息可以举报/.test(combined)) {
+      return { category: 'invalid', label: '🚫 账号异常', ignoreFollowup: true };
+    }
+    if (/营销顾问|生态营销|广告投放|聚光投放|官方顾问|合作想沟通|商务合作|推广合作/.test(combined)) {
+      return { category: 'vendor', label: '📢 平台推销', ignoreFollowup: true };
+    }
+    if (/留客资/.test(combined) || (turns || []).some(t => /微信号?|vx|wx|手机号/i.test(t.content) && t.role === 'user')) {
+      return { category: 'lead', label: '📋 已留客资', ignoreFollowup: false };
+    }
+    if ((turns || []).some(t => String(t.content).includes('对方已点击你的企业微信联系卡')) || cardText.includes('对方已点击你的企业微信联系卡')) {
+      return { category: 'wecom', label: '📇 企微已点', ignoreFollowup: false };
+    }
+    if (/邀请码|内测|怎么用|怎么买|价格|多少钱|收费|排版|工具|试用|考证|家装|美业|教培|自媒体/.test(combined)) {
+      return { category: 'prospect', label: '🎯 意向客户', ignoreFollowup: false };
+    }
+    return { category: 'general', label: '💬 咨询', ignoreFollowup: false };
+  }
+
+  function scanAndSyncContactList() {
+    const cards = Array.from(document.querySelectorAll('.sx-contact-item')).filter(c => !isVirtualGhost(c));
+    if (!cards.length) return;
+    state.followupStateMap ||= {};
+    let changed = false;
+    for (const card of cards) {
+      const name = cleanText(card.querySelector('.nick-name')?.innerText);
+      const dataKey = card.getAttribute('data-key') || '';
+      const id = dataKey || `name:${name}`;
+      if (!name || !id) continue;
+      const rawText = cleanText(card.innerText);
+      const lines = rawText.split(/\s{2,}|\n/).map(l => cleanText(l)).filter(Boolean);
+      const snippetLine = lines.filter(l => l !== name && !/^\d{1,2}:\d{2}/.test(l) && !/^\d{2}\/\d{2}/.test(l) && l !== '留客资' && l !== '[超时未回复]').at(-1) || '';
+      const timeLine = lines.find(l => /^\d{1,2}:\d{2}/.test(l) || /^\d{2}\/\d{2}/.test(l)) || '';
+      
+      const previous = state.followupStateMap[id] || {};
+      const intent = classifyCustomerIntent(name, [{ content: snippetLine, role: 'user' }], rawText);
+      const snippet = snippetLine || previous.snippet || '暂无对话';
+      const timeText = timeLine || previous.timeText || '最近';
+      
+      let stage = previous.stage || 'waiting_reply';
+      let nextFollowupAt = Number(previous.nextFollowupAt || 0);
+      let followupCount = Number(previous.followupCount || 0);
+
+      if (intent.ignoreFollowup) {
+        stage = intent.category;
+        nextFollowupAt = 0;
+      } else if (rawText.includes('[超时未回复]') || card.querySelector('.d-badge, .d-badge-floating, [class*="badge"]') || rawText.includes('[笔记]') || rawText.includes('[图片]')) {
+        stage = 'needs_reply';
+        nextFollowupAt = 0;
+      } else if (intent.category === 'wecom') {
+        stage = 'card_clicked_unconfirmed';
+        nextFollowupAt ||= Date.now() + 24 * 60 * 60 * 1000;
+      } else if (intent.category === 'lead') {
+        stage = 'lead_captured';
+        nextFollowupAt = 0;
+      } else if (stage !== 'done') {
+        if (!nextFollowupAt) {
+          nextFollowupAt = Date.now() + 24 * 60 * 60 * 1000;
+        }
+      }
+
+      const nextItem = {
+        ...previous,
+        sessionId: id,
+        userName: name,
+        category: intent.category,
+        categoryLabel: intent.label,
+        snippet,
+        timeText,
+        stage,
+        nextFollowupAt,
+        followupCount,
+        updatedAt: Date.now()
+      };
+
+      if (followupStateChanged(previous, nextItem)) {
+        state.followupStateMap[id] = nextItem;
+        changed = true;
+      }
+    }
+    if (changed) {
+      storageSet({ followupStateMap: state.followupStateMap });
+    }
+  }
+
+  function followupStateChanged(previous, next) {
+    return ['userName', 'stage', 'category', 'snippet', 'lastCustomerAt', 'lastAssistantAt', 'nextFollowupAt', 'followupCount', 'cardClicked', 'leadCaptured']
+      .some(key => previous?.[key] !== next?.[key]);
+  }
+
+  function updateCustomerStageUI(item) {
+    const label = document.getElementById('xhsCustomerStage');
+    if (!label || !item) return;
+    const names = {
+      needs_reply: '待回复', card_sent: '已发名片', card_clicked_unconfirmed: '名片已点击，添加未确认',
+      lead_captured: '已留资', waiting_reply: '等待回复', followup_due: '到期跟进', done: '已停止跟进'
+    };
+    label.textContent = names[item.stage] || '待判断';
+    label.dataset.stage = item.stage || '';
+  }
+
+  async function setFollowupState(session, patch) {
+    if (!session?.id) return null;
+    state.followupStateMap ||= {};
+    const previous = state.followupStateMap[session.id] || {
+      sessionId: session.id, userName: session.name, stage: 'waiting_reply',
+      lastCustomerAt: 0, lastAssistantAt: 0, nextFollowupAt: 0, followupCount: 0
+    };
+    const next = {
+      ...previous, ...patch, sessionId: session.id, userName: session.name || previous.userName,
+      updatedAt: Date.now()
+    };
+    updateCustomerStageUI(next);
+    if (!followupStateChanged(previous, next)) return previous;
+    state.followupStateMap = { ...state.followupStateMap, [session.id]: next };
+    await storageSet({ followupStateMap: state.followupStateMap });
+    return next;
+  }
+
+  async function syncFollowupState(session, history) {
+    const previous = state.followupStateMap?.[session.id] || {};
+    const userTurns = history.turns.filter(turn => turn.role === 'user');
+    const assistantTurns = history.turns.filter(turn => turn.role === 'assistant');
+    const lastCustomerAt = Number(userTurns.at(-1)?.timestamp || previous.lastCustomerAt || 0);
+    const lastAssistantAt = Number(assistantTurns.at(-1)?.timestamp || previous.lastAssistantAt || Date.now());
+    const cardClicked = history.turns.some(turn => turn.role === 'system'
+      && cleanText(turn.content).includes('对方已点击你的企业微信联系卡')) || Boolean(previous.cardClicked);
+    const cardSent = history.turns.some(turn => turn.role === 'assistant' && turn.type === 'card');
+    const leadCaptured = Boolean(extractLead(history, session)) || Boolean(previous.leadCaptured);
+    const intent = classifyCustomerIntent(session.name, history.turns, session?.card?.innerText || '');
+
+    const newestTurn = history.newestTurn || history.turns.at(-1);
+    const snippet = newestTurn ? `${newestTurn.role === 'assistant' ? '客服' : '客户'}: ${cleanText(newestTurn.content).slice(0, 80)}` : (previous.snippet || '暂无对话');
+    const timeText = newestTurn?.timeText || (newestTurn?.timestamp ? new Date(newestTurn.timestamp).toLocaleString('zh-CN', { hour12: false }) : '刚刚');
+
+    let stage = previous.stage || 'waiting_reply';
+    let nextFollowupAt = Number(previous.nextFollowupAt || 0);
+    let followupCount = Number(previous.followupCount || 0);
+
+    if (intent.ignoreFollowup) {
+      stage = intent.category;
+      nextFollowupAt = 0;
+    } else if (history.needsReply) {
+      stage = 'needs_reply';
+      nextFollowupAt = 0;
+      followupCount = 0;
+    } else if (leadCaptured && !lastAssistantAt) {
+      stage = 'lead_captured';
+      nextFollowupAt = 0;
+    } else if (lastAssistantAt) {
+      if (!nextFollowupAt || (lastAssistantAt !== Number(previous.lastAssistantAt || 0) && previous.stage !== 'followup_due')) {
+        nextFollowupAt = lastAssistantAt + 24 * 60 * 60 * 1000;
+      }
+      if (followupCount >= 2) {
+        stage = 'done';
+        nextFollowupAt = 0;
+      } else if (nextFollowupAt && nextFollowupAt <= Date.now()) {
+        stage = 'followup_due';
+      } else if (cardClicked) {
+        stage = 'card_clicked_unconfirmed';
+      } else if (cardSent || previous.stage === 'card_sent') {
+        stage = 'card_sent';
+      } else {
+        stage = 'waiting_reply';
+      }
+    } else if (cardClicked) {
+      stage = 'card_clicked_unconfirmed';
+      nextFollowupAt ||= Date.now() + 24 * 60 * 60 * 1000;
+    }
+    return setFollowupState(session, {
+      stage, category: intent.category, categoryLabel: intent.label,
+      snippet, timeText, lastCustomerAt, lastAssistantAt, nextFollowupAt,
+      followupCount, cardClicked, leadCaptured
+    });
+  }
+
+  async function recordOutboundFollowup(session, action = 'reply') {
+    const previous = state.followupStateMap?.[session.id] || {};
+    const isFollowup = action === 'manual_followup';
+    const followupCount = isFollowup
+      ? Math.min(2, Number(previous.followupCount || 0) + 1)
+      : Number(previous.followupCount || 0);
+    return setFollowupState(session, {
+      stage: followupCount >= 2 ? 'done' : 'waiting_reply',
+      lastAssistantAt: Date.now(),
+      nextFollowupAt: followupCount >= 2
+        ? 0
+        : Date.now() + (isFollowup ? 72 : 24) * 60 * 60 * 1000,
+      followupCount
+    });
+  }
 
   async function ensureDailyStats() {
     const next = Safety.normalizeDailyStats(state);
@@ -139,15 +499,22 @@
   }
 
   function getBridgeUrl() {
-    return String(state.bridgeUrl || DEFAULTS.bridgeUrl).replace(/\/+$/, '');
+    return 'http://127.0.0.1:18195';
   }
 
   function apiHeaders() {
     const headers = { 'Content-Type': 'application/json' };
-    if (state.workspaceToken) headers.Authorization = `Bearer ${state.workspaceToken}`;
+    if (state.workspaceToken) headers.Authorization = "Bearer " + state.workspaceToken;
+    let baseUrl = state.modelBaseUrl || 'http://127.0.0.1:10100/v1/chat/completions';
+    let modelName = state.modelName || 'google-antigravity/gemini-3.7-flash';
+    const isRemote = /^https?:\/\//i.test(baseUrl) && !/127\.0\.0\.1|localhost|::1/i.test(baseUrl);
+    if (!state.modelApiKey && isRemote) {
+      baseUrl = 'http://127.0.0.1:10100/v1/chat/completions';
+      modelName = 'google-antigravity/gemini-3.7-flash';
+    }
+    headers['X-Model-Base-Url'] = baseUrl;
+    headers['X-Model-Name'] = modelName;
     if (state.modelApiKey) headers['X-Model-Key'] = state.modelApiKey;
-    if (state.modelBaseUrl) headers['X-Model-Base-Url'] = state.modelBaseUrl;
-    if (state.modelName) headers['X-Model-Name'] = state.modelName;
     if (state.embeddingBaseUrl) headers['X-Embedding-Base-Url'] = state.embeddingBaseUrl;
     if (state.embeddingModel) headers['X-Embedding-Model'] = state.embeddingModel;
     if (state.embeddingApiKey) headers['X-Embedding-Key'] = state.embeddingApiKey;
@@ -180,6 +547,14 @@
       if (!text || text.length > 32) continue;
       const timestamp = parseTimestamp(text);
       if (timestamp) return timestamp;
+    }
+    // 兜底：小红书消息气泡上方常有带日期的文本前缀，如 "2026-09-01 10:54:19 新作AI"
+    const rawItemText = cleanText(item.innerText || '');
+    const bubbleText = cleanText(bubble?.innerText || '');
+    const prefix = rawItemText.replace(bubbleText, '').trim();
+    if (prefix) {
+      const match = prefix.match(/(20\d{2}[-/][01]?\d[-/][0-3]?\d\s+[0-2]?\d:[0-5]\d(?::[0-5]\d)?|(?:今天|昨天)?\s*[0-2]?\d:[0-5]\d)/);
+      if (match) return parseTimestamp(match[0]);
     }
     return 0;
   }
@@ -225,33 +600,52 @@
   }
 
   function parseConversationHistory(session) {
-    const scroller = Array.from(document.querySelectorAll('.vue-recycle-scroller.recyScroll1'))
-      .find(el => isVisible(el) && el.querySelector('.im-msg-item'));
+    let scroller = Array.from(document.querySelectorAll('.vue-recycle-scroller.recyScroll1, .vue-recycle-scroller'))
+      .find(el => el.querySelector('.im-msg-item, [class*="msg-item"]'));
+    if (!scroller) {
+      scroller = document.querySelector('[class*="chat-content"], [class*="msg-list"], .im-chat-content, .chat-window, body');
+    }
     if (!scroller) return emptyHistory(session);
 
-    const records = Array.from(scroller.querySelectorAll('.im-msg-item'))
-      .filter(item => {
-        if (!isVisible(item)) return false;
-        // 切换客户后，Vue 会把上一会话的复用节点移到 -9999px，但节点尺寸仍非 0。
-        // 这些节点若不排除，会把 A 客户的消息混入 B 客户上下文。
-        return !isVirtualGhost(item);
-      })
+    const records = Array.from(scroller.querySelectorAll('.im-msg-item, [class*="msg-item"], [class*="message-item"]'))
+      .filter(item => !isVirtualGhost(item))
       .map((item, domIndex) => {
-        const bubble = item.querySelector('.text-message, .card_container');
-        if (!bubble || !isVisible(bubble)) return null;
-        const content = cleanText(bubble.innerText || bubble.textContent);
+        const isSystemNotice = item.querySelector('[style*="align-items: center"], .system-message, .tip-message') ||
+          cleanText(item.innerText).includes('对方已点击你的企业微信联系卡') ||
+          cleanText(item.innerText).includes('对方提交了留资卡');
+        const bubble = item.querySelector('.text-message, .card_container, .card-container, [class*="card"]');
+        let content = cleanText(bubble?.innerText || bubble?.textContent);
+        if (!content && isSystemNotice) {
+          content = cleanText(item.innerText).replace(/20\d{2}[-/]\d+[-/]\d+\s+\d+:\d+(?::\d+)?/, '').trim();
+        }
         if (!content) return null;
+
         const itemRect = item.getBoundingClientRect();
-        const bubbleRect = bubble.getBoundingClientRect();
-        const hasRightDirection = Boolean(item.querySelector('.right'));
-        const hasLeftDirection = Boolean(item.querySelector('.left'));
+        const bubbleRect = bubble ? bubble.getBoundingClientRect() : itemRect;
+        const hasRightDirection = Boolean(item.querySelector('.right, [class*="right"], [class*="mine"], [class*="self"]')) || item.classList.contains('right');
+        const hasLeftDirection = Boolean(item.querySelector('.left, [class*="left"], [class*="other"]')) || item.classList.contains('left');
+
+        let role = 'user';
+        let type = 'text';
+        if (isSystemNotice) {
+          role = 'system';
+          type = 'system_notice';
+        } else if (hasRightDirection || (!hasLeftDirection && itemRect.width > 0 && bubbleRect.left >= itemRect.left + itemRect.width * 0.43)) {
+          role = 'assistant';
+          if (content.includes('企业微信') || content.includes('获客链接') || bubble?.classList.contains('card_container')) {
+            type = 'card';
+          }
+        } else if (bubble?.classList.contains('card_container') || content.includes('分享卡片') || content.includes('[笔记]')) {
+          type = 'card';
+        }
+
+        const timestamp = extractMessageTimestamp(item, bubble || item);
         return {
-          role: hasRightDirection || (!hasLeftDirection && bubbleRect.left >= itemRect.left + itemRect.width * 0.43)
-            ? 'assistant'
-            : 'user',
+          role,
           content,
-          type: bubble.classList.contains('card_container') ? 'card' : 'text',
-          timestamp: extractMessageTimestamp(item, bubble),
+          type,
+          timestamp,
+          timeText: timestamp ? new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false }) : '',
           domIndex
         };
       }).filter(Boolean);
@@ -279,13 +673,9 @@
     };
   }
 
-  function extractLead(text) {
-    if (!text) return null;
-    const phone = text.match(/(?:1[3-9]\d{9})/);
-    const wechat = text.match(/(?:微信号?|vx|wx|VX)[\s:：_\-]*([a-zA-Z][a-zA-Z0-9_-]{5,19}|1[3-9]\d{9})/i);
-    if (phone) return { type: '手机号', value: phone[0] };
-    if (wechat) return { type: '微信号', value: wechat[1] || wechat[0] };
-    return null;
+  function extractLead(history, session) {
+    const platformLeadHint = cleanText(session?.card?.innerText).includes('留客资');
+    return Safety.extractContactLead(history?.turns || [], platformLeadHint);
   }
 
   function safeSetNativeValue(element, value) {
@@ -307,11 +697,134 @@
     const input = document.querySelector(selector);
     if (input && !cleanText(input.value)) {
       safeSetNativeValue(input, lead.value);
-      ensureDailyStats().then(() => {
-        state.leadsCount += 1;
-        storageSet({ leadsCount: state.leadsCount, statsDate: state.statsDate });
-      });
       addLog('lead', `已识别${lead.type}并预填右侧客资：${lead.value}`);
+    }
+  }
+
+  async function captureLead(session, history) {
+    const lead = extractLead(history, session);
+    if (!lead || !session?.id) return { found: false, created: false };
+    const key = `${session.id}:${lead.type}:${lead.value}`;
+    if (capturedLeadKeys.has(key)) return { found: true, created: false };
+    if (Number(leadRetryUntil.get(key) || 0) > Date.now()) return { found: true, created: false };
+    capturedLeadKeys.add(key);
+    syncLeadToRightPanel(lead);
+    void setFollowupState(session, { stage: 'lead_captured', leadCaptured: true, nextFollowupAt: 0 });
+    try {
+      const response = await bridgeFetch(`${getBridgeUrl()}/leads/capture`, {
+        method: 'POST', headers: apiHeaders(),
+        body: JSON.stringify({
+          session_id: session.id, user_name: session.name,
+          lead_type: lead.type, lead_value: lead.value,
+          lead_timestamp: lead.timestamp || history.latestUserTurn?.timestamp || 0,
+          context_summary: history.turns.slice(-6).map(turn => turn.content).join(' | ')
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      // 仅当客资真实发生时间为今天时，才计入插件今日统计；历史客资不计入今日新增
+      if (data.created && Safety.isSameDay(lead.timestamp || history.latestUserTurn?.timestamp || Date.now())) {
+        await ensureDailyStats();
+        state.leadsCount += 1;
+        await storageSet({ leadsCount: state.leadsCount, statsDate: state.statsDate });
+      }
+      addLog('lead', `客资已入库：${session.name} · ${lead.type}`);
+      return { found: true, created: Boolean(data.created) };
+    } catch (error) {
+      capturedLeadKeys.delete(key);
+      leadRetryUntil.set(key, Date.now() + 60_000);
+      const msg = error.message && error.message.includes('Failed to fetch') ? 'Bridge 离线，客资暂存本地' : (error.message || 'Bridge 不可用');
+      addLog('warn', `客资入库提示：${msg}`);
+      return { found: true, created: false, error: msg };
+    }
+  }
+
+  async function syncPlatformLeads() {
+    if (leadSyncRunning) return { ok: false, error: '留资同步正在进行中' };
+    leadSyncRunning = true;
+    abortPendingRequest('lead_sync_started');
+    const syncStartedAt = Date.now();
+    let cancelled = false;
+    const originalSessionId = getActiveSession()?.id || '';
+    const scroller = getVisibleContactScroller();
+    const originalScrollTop = Number(scroller?.scrollTop || 0);
+    const visited = new Set();
+    let tagged = 0;
+    let captured = 0;
+    updateRuntimeStatus('copilot', '正在同步平台留资');
+    try {
+      if (Safety.shouldAbortLeadSync(syncStartedAt, lastUserActivityAt)) {
+        cancelled = true;
+        return { ok: false, cancelled: true, error: '检测到人工操作，留资同步已取消' };
+      }
+      if (scroller) {
+        scroller.scrollTop = 0;
+        scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+        await sleep(180);
+      }
+      for (let page = 0; page < 80; page += 1) {
+        if (Safety.shouldAbortLeadSync(syncStartedAt, lastUserActivityAt)) {
+          cancelled = true;
+          return { ok: false, cancelled: true, error: '检测到人工操作，留资同步已取消' };
+        }
+        const descriptors = Array.from(document.querySelectorAll('.sx-contact-item'))
+          .filter(card => isVisible(card) && !isVirtualGhost(card) && cleanText(card.innerText).includes('留客资'))
+          .map(card => ({
+            id: card.getAttribute('data-key') || `name:${cleanText(card.querySelector('.nick-name')?.innerText)}`,
+            name: cleanText(card.querySelector('.nick-name')?.innerText)
+          }))
+          .filter(item => item.id && !visited.has(item.id));
+        for (const item of descriptors) {
+          if (Safety.shouldAbortLeadSync(syncStartedAt, lastUserActivityAt)) {
+            cancelled = true;
+            return { ok: false, cancelled: true, error: '检测到人工操作，留资同步已取消' };
+          }
+          visited.add(item.id);
+          tagged += 1;
+          const card = Array.from(document.querySelectorAll('.sx-contact-item')).find(candidate => {
+            const id = candidate.getAttribute('data-key') || `name:${cleanText(candidate.querySelector('.nick-name')?.innerText)}`;
+            return id === item.id && isVisible(candidate) && !isVirtualGhost(candidate);
+          });
+          if (!card) continue;
+          if (getActiveSession()?.id !== item.id) card.click();
+          const session = await waitForSession(item.id, 2400);
+          if (Safety.shouldAbortLeadSync(syncStartedAt, lastUserActivityAt)) {
+            cancelled = true;
+            return { ok: false, cancelled: true, error: '检测到人工操作，留资同步已取消' };
+          }
+          if (!session) continue;
+          if (ensureMessageWindowAtBottom()) await sleep(260);
+          else await sleep(120);
+          const result = await captureLead(session, parseConversationHistory(session));
+          if (result?.found) captured += 1;
+        }
+        if (!scroller) break;
+        const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+        if (scroller.scrollTop >= maxScrollTop - 8) break;
+        const next = Math.min(maxScrollTop, scroller.scrollTop + Math.max(220, Math.floor(scroller.clientHeight * 0.85)));
+        if (next === scroller.scrollTop) break;
+        scroller.scrollTop = next;
+        scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+        await sleep(180);
+      }
+      return { ok: true, tagged, captured };
+    } finally {
+      if (!cancelled && scroller) {
+        scroller.scrollTop = originalScrollTop;
+        scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+        await sleep(180);
+      }
+      const originalCard = !cancelled && Array.from(document.querySelectorAll('.sx-contact-item')).find(card => {
+        const id = card.getAttribute('data-key') || `name:${cleanText(card.querySelector('.nick-name')?.innerText)}`;
+        return id === originalSessionId && isVisible(card) && !isVirtualGhost(card);
+      });
+      if (originalCard && getActiveSession()?.id !== originalSessionId) {
+        originalCard.click();
+        await waitForSession(originalSessionId, 1800);
+      }
+      leadSyncRunning = false;
+      updateRuntimeStatus('copilot', cancelled ? '留资同步已由人工操作取消' : '等待客户新消息');
+      scheduleSense(250);
     }
   }
 
@@ -323,6 +836,22 @@
   }
 
   async function suspendForAuthFailure() {
+    try {
+      const response = await bridgeFetch(`${getBridgeUrl()}/tenant/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace_name: state.workspaceName || '我的工作区' })
+      });
+      const data = await response.json();
+      if (data.ok && data.access_token) {
+        state.workspaceToken = data.access_token;
+        state.enabled = true;
+        await storageSet({ workspaceToken: data.access_token, enabled: true });
+        globalCircuitUntil = 0;
+        addLog('info', '已自动刷新并连接工作区凭据');
+        return;
+      }
+    } catch (_) {}
     state.enabled = false;
     state.fullAutoArmedAt = 0;
     state.operatorAway = false;
@@ -348,7 +877,7 @@
     const requestStartedAt = Date.now();
     addLog('info', `分析 [${session.name}] 的 ${history.turns.length} 条会话记录…`);
     try {
-      const response = await fetch(`${getBridgeUrl()}/reply`, {
+      const response = await bridgeFetch(`${getBridgeUrl()}/reply`, {
         method: 'POST', headers: apiHeaders(), signal: controller.signal,
         body: JSON.stringify({
           session_id: session.id, user_name: session.name, action,
@@ -366,6 +895,7 @@
       }
       const data = await response.json();
       lastComplianceFlags = Array.isArray(data.compliance_flags) ? data.compliance_flags : [];
+      lastSendCardDirective = data.send_card || null;
       const active = getActiveSession();
       const activeHistory = active ? parseConversationHistory(active) : null;
       if (serial !== requestSerial || !active || active.id !== session.id || activeHistory?.signature !== history.signature) {
@@ -385,7 +915,7 @@
             shared_cards: history.sharedCards.slice(-3), knowledge_scope: getKnowledgeScope(),
             fallback_text: reply, temperature: 0.3
           });
-          const retryResponse = await fetch(getBridgeUrl() + '/reply', {
+          const retryResponse = await bridgeFetch(getBridgeUrl() + '/reply', {
             method: 'POST', headers: apiHeaders(), signal: controller.signal, body: retryBody
           });
           if (retryResponse.ok) {
@@ -420,9 +950,18 @@
           llmFailureCount: Number(state.monitor?.llmFailureCount || 0) + 1, lastError: error.message || '请求失败' });
         let friendlyMsg = error.message || '请求失败';
         if (friendlyMsg === 'model_api_key_required') {
-          friendlyMsg = '未配置大模型 API Key。请打开配置后台填入你的模型 Key 并保存';
+          friendlyMsg = '未配置大模型 API Key，请在设置后台填入';
+        } else if (friendlyMsg.includes('Failed to fetch') || error?.name === 'TypeError' || status === 0) {
+          friendlyMsg = '无法连接本地 Bridge 服务（127.0.0.1:18195）';
         }
-        if (status !== 401 && status !== 403) addLog('error', `${friendlyMsg}；同一消息将在 ${Math.ceil(delay / 1000)} 秒后重试`);
+        if (status !== 401 && status !== 403) {
+          if (state.runMode === 'copilot') {
+            copilotAttemptedSignatures.add(history.signature);
+            addLog('error', `${friendlyMsg}（点击上方按钮可重新生成）`);
+          } else {
+            addLog('error', `${friendlyMsg}；同一消息将在 ${Math.ceil(delay / 1000)} 秒后重试`);
+          }
+        }
       }
       return '';
     } finally {
@@ -471,7 +1010,7 @@
     currentDraftSessionId = '';
   }
 
-  function placeDraft(session, history, reply) {
+  function placeDraft(session, history, reply, action = (history.needsReply ? 'reply' : 'manual_followup'), persist = true) {
     if (!reply || getActiveSession()?.id !== session.id) return false;
     const textarea = getReplyTextarea();
     if (!textarea) return false;
@@ -482,7 +1021,8 @@
       return false;
     }
     safeSetNativeValue(textarea, reply);
-    draftCache.set(session.id, { signature: history.signature, reply });
+    draftCache.set(session.id, { signature: history.signature, reply, action, sendRecorded: false });
+    if (persist) savePersistentDraft(session, history, action, reply).catch(() => {});
     currentDraftSessionId = session.id;
     feedbackCandidate = {
       session: { id: session.id, name: session.name },
@@ -519,12 +1059,17 @@
     if (!session || !cached || !humanReply) return;
     manualDraftCache.delete(session.id);
     const history = parseConversationHistory(session);
+    rememberHistorySample(session, history);
     feedbackCandidate = {
       session: { id: session.id, name: session.name },
       history: JSON.parse(JSON.stringify(history)), aiReply: cached.reply, humanReply,
       knowledgeScope: getKnowledgeScope(), sent: true
     };
     feedbackCandidates.set(session.id, feedbackCandidate);
+    if (!cached.sendRecorded) {
+      cached.sendRecorded = true;
+      void recordOutboundFollowup(session, cached.action || 'reply');
+    }
     showFeedbackCard(feedbackCandidate, true);
   }
 
@@ -545,7 +1090,7 @@
     if (button) button.disabled = true;
     if (status) status.textContent = cleanText(reasonInput?.value) ? '正在保存人工经验…' : '正在分析为什么这样回更好…';
     try {
-      const response = await fetch(`${getBridgeUrl()}/feedback`, {
+      const response = await bridgeFetch(`${getBridgeUrl()}/feedback`, {
         method: 'POST', headers: apiHeaders(),
         body: JSON.stringify({
           session_id: candidate.session.id, user_name: candidate.session.name,
@@ -570,9 +1115,14 @@
   }
 
   async function handleCopilotSession(force = false) {
-    if (destroyed || !state.enabled || state.runMode !== 'copilot') return;
+    if (destroyed || leadSyncRunning || (!state.enabled && !force) || state.runMode !== 'copilot') return;
+    if (force && !state.enabled) {
+      state.enabled = true;
+      await storageSet({ enabled: true });
+      syncDockFromState();
+    }
     const session = getActiveSession();
-    if (!session?.stable) return;
+    if (!session || (!force && !session.stable)) return;
     const isSwitching = session.id !== currentSessionId;
     if (session.id !== currentSessionId) {
       releasePreviousPluginDraft(session.id);
@@ -582,9 +1132,25 @@
     // 只有在主动点击按钮(force)或者刚切换会话时才尝试归位，日常轮询不抢夺用户滚动条
     if ((force || isSwitching) && ensureMessageWindowAtBottom()) await sleep(260);
     const history = parseConversationHistory(session);
+    rememberHistorySample(session, history);
+    void captureLead(session, history);
+    const followupState = await syncFollowupState(session, history);
+    const followupDue = !history.needsReply && followupState?.stage === 'followup_due'
+      && Number(followupState.followupCount || 0) < 2;
+    const action = (!history.needsReply && (force || followupDue)) ? 'manual_followup' : 'reply';
+    const effectiveHistory = followupDue
+      ? { ...history, signature: `${history.signature}::followup:${Number(followupState.followupCount || 0) + 1}:${followupState.nextFollowupAt}` }
+      : history;
+
+    if (force) {
+      userClearedSignatures.delete(session.id);
+      copilotAttemptedSignatures.delete(effectiveHistory.signature);
+      messageRetryUntil.delete(effectiveHistory.signature);
+    }
+
     const savedManualDraft = manualDraftCache.get(session.id);
     if (savedManualDraft) {
-      if (savedManualDraft.signature === history.signature && !cleanText(getReplyTextarea()?.value)) {
+      if (savedManualDraft.signature === history.signature && !cleanText(getReplyTextarea()?.value) && !userClearedSignatures.has(session.id)) {
         safeSetNativeValue(getReplyTextarea(), savedManualDraft.text);
         currentDraftSessionId = session.id;
         updateRuntimeStatus('copilot', '已恢复该客户未发送的人工草稿');
@@ -592,21 +1158,41 @@
       }
       if (savedManualDraft.signature !== history.signature) manualDraftCache.delete(session.id);
     }
-    if (!force && Number(messageRetryUntil.get(history.signature) || 0) > Date.now()) return;
+    if (!force && Number(messageRetryUntil.get(effectiveHistory.signature) || 0) > Date.now()) return;
+
+    // 用户已明确清空当前签名的草稿，日常后台轮询绝不再重复打扰或回填
+    if (!force && userClearedSignatures.get(session.id) === effectiveHistory.signature) return;
+    // 副驾模式下若已尝试过且失败，不再在后台自动循环重试报错，等待用户主动点击或新消息
+    if (!force && copilotAttemptedSignatures.has(effectiveHistory.signature)) return;
+
     const cached = draftCache.get(session.id);
-    if (!force && !history.needsReply) {
+    if (!force && !history.needsReply && !followupDue) {
       updateRuntimeStatus('copilot', '等待客户新消息');
       return;
     }
-    if (!force && cached?.signature === history.signature) {
-      if (!cleanText(getReplyTextarea()?.value)) placeDraft(session, history, cached.reply);
+
+    // 相同会话在非切换、非强制触发时，如果已经生成过当前签名的草稿，绝不重复回填输入框
+    if (!force && cached?.signature === effectiveHistory.signature) {
+      if (isSwitching && !cleanText(getReplyTextarea()?.value)) placeDraft(session, effectiveHistory, cached.reply, action);
       return;
     }
-    const lead = extractLead(history.latestUserMsg);
-    if (lead) syncLeadToRightPanel(lead);
-    const action = force && !history.needsReply ? 'manual_followup' : 'reply';
-    const reply = await fetchLLMReply(history, session, action);
-    if (placeDraft(session, history, reply)) updateRuntimeStatus('copilot', '草稿已按当前会话生成');
+
+    // 如果当前输入框已有用户正在输入的内容（非 AI 草稿），不进行覆盖
+    const currentInput = cleanText(getReplyTextarea()?.value);
+    if (!force && currentInput && currentInput !== cleanText(cached?.reply)) return;
+
+    if (!force) {
+      const persistent = lookupPersistentDraft(session, effectiveHistory, action);
+      if (persistent && placeDraft(session, effectiveHistory, persistent.reply, action, false)) {
+        updateRuntimeStatus('copilot', '已恢复该客户上次草稿');
+        return;
+      }
+    }
+    const reply = await fetchLLMReply(effectiveHistory, session, action);
+    if (placeDraft(session, effectiveHistory, reply, action)) {
+      const cardHint = lastSendCardDirective === 'wecom' ? ' · 建议点击上方发送企微名片' : (lastSendCardDirective === 'lead' ? ' · 建议点击发送留资卡' : '');
+      updateRuntimeStatus('copilot', `草稿已生成${cardHint}`);
+    }
     if (reply && lastComplianceFlags.length) addLog('warn', '草稿含敏感表述（' + lastComplianceFlags.join('、') + '），发送前请留意');
   }
 
@@ -758,7 +1344,7 @@
   }
 
   async function runFullAutoCycle() {
-    if (destroyed || autoProcessing || !isFullAutoArmed() || !isWithinTimeScope()) return;
+    if (destroyed || leadSyncRunning || autoProcessing || !isFullAutoArmed() || !isWithinTimeScope()) return;
     if (document.hasFocus() && Date.now() - lastUserActivityAt < 60_000) {
       updateRuntimeStatus('full_auto', '人工操作中，暂缓切换');
       return;
@@ -818,8 +1404,7 @@
         addLog('info', `已将 [${session.name}] 的外部状态确认交给人工处理`);
         return;
       }
-      const lead = extractLead(history.latestUserMsg);
-      if (lead) syncLeadToRightPanel(lead);
+      await captureLead(session, history);
       const reply = await fetchLLMReply(history, session, 'auto_reply');
       if (!reply) {
         if (!messageRetryUntil.has(history.signature)) messageRetryUntil.set(history.signature, Date.now() + 60_000);
@@ -860,6 +1445,15 @@
       pruneProcessedMap();
       await storageSet({ processedMap: state.processedMap, hourlySendTimestamps: state.hourlySendTimestamps, repliedCount: state.repliedCount, statsDate: state.statsDate });
       addLog('success', `已自动回复 [${session.name}]；会话签名已锁定防重复`);
+
+      // 全自动模式下：若模型给出推卡指令且近期未重复发送，自动触发推送官方名片/留资卡
+      if (lastSendCardDirective && (lastSendCardDirective === 'wecom' || lastSendCardDirective === 'lead')) {
+        const cardRecentlySent = history.turns.slice(-4).some(t => t.type === 'card' || (t.content || '').includes('企业微信') || (t.content || '').includes('名片'));
+        if (!cardRecentlySent) {
+          await sleep(1000);
+          await sendOfficialCard(lastSendCardDirective);
+        }
+      }
     } finally {
       await releaseSendLease(sendLeaseKey);
       await restoreSession(originalSessionId, operationStartedAt);
@@ -906,7 +1500,7 @@
       if (file.size > 10 * 1024 * 1024) { if (status) status.textContent = `${file.name} 超过 10MB`; continue; }
       try {
         if (status) status.textContent = `正在解析并索引 ${file.name}…`;
-        const response = await fetch(`${getBridgeUrl()}/knowledge/upload`, {
+        const response = await bridgeFetch(`${getBridgeUrl()}/knowledge/upload`, {
           method: 'POST', headers: apiHeaders(),
           body: JSON.stringify({ filename: file.name, content_base64: await readFileBase64(file) })
         });
@@ -927,7 +1521,7 @@
     if (!url) { if (status) status.textContent = '请粘贴飞书文档或知识库链接'; return; }
     try {
       if (status) status.textContent = '正在读取飞书文档并建立索引…';
-      const response = await fetch(`${getBridgeUrl()}/knowledge/feishu`, {
+      const response = await bridgeFetch(`${getBridgeUrl()}/knowledge/feishu`, {
         method: 'POST', headers: feishuHeaders(), body: JSON.stringify({ url })
       });
       const data = await response.json();
@@ -943,7 +1537,7 @@
   async function setKnowledgeDocumentEnabled(id, enabled) {
     // P2 fix: 软停用确认，不做永久删除
     if (!enabled && !window.confirm('停用这份业务资料？资料会保留，可随时恢复。')) return;
-    const response = await fetch(`${getBridgeUrl()}/knowledge/status`, {
+    const response = await bridgeFetch(`${getBridgeUrl()}/knowledge/status`, {
       method: 'POST', headers: apiHeaders(), body: JSON.stringify({ id, enabled, soft: true })
     });
     const data = await response.json();
@@ -956,7 +1550,7 @@
     if (!list) return;
     list.textContent = '正在读取业务资料…';
     try {
-      const response = await fetch(`${getBridgeUrl()}/knowledge/documents`, { headers: apiHeaders() });
+      const response = await bridgeFetch(`${getBridgeUrl()}/knowledge/documents`, { headers: apiHeaders() });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
       list.replaceChildren();
@@ -983,7 +1577,7 @@
     list.textContent = '正在读取当前知识空间…';
     try {
       const scope = encodeURIComponent(getKnowledgeScope());
-      const response = await fetch(`${getBridgeUrl()}/feedback/list?scope=${scope}&limit=30`, { headers: apiHeaders() });
+      const response = await bridgeFetch(`${getBridgeUrl()}/feedback/list?scope=${scope}&limit=30`, { headers: apiHeaders() });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
       if (count) count.textContent = `${data.items.length} 条案例 · ${data.scope}`;
@@ -1017,7 +1611,7 @@
   async function setKnowledgeEnabled(id, enabled) {
     if (!enabled && !window.confirm('停用这条人工案例？它会保留，可随时恢复。')) return;
     try {
-      const response = await fetch(`${getBridgeUrl()}/feedback/status`, {
+      const response = await bridgeFetch(`${getBridgeUrl()}/feedback/status`, {
         method: 'POST', headers: apiHeaders(),
         body: JSON.stringify({ id, enabled, knowledge_scope: getKnowledgeScope() })
       });
@@ -1097,6 +1691,11 @@
         <div class="xhs-dock-tabs"><div class="xhs-dock-tab active" data-tab="quick">快捷操作</div><div class="xhs-dock-tab" data-tab="settings">开关与设置</div><div class="xhs-dock-tab" data-tab="knowledge">案例库</div></div>
         <div class="xhs-dock-body" id="xhsTabQuick">
           <button class="xhs-btn xhs-btn-primary" style="width:100%;padding:9px;" id="xhsBtnGenNow">生成专属草稿</button>
+          <div style="display:flex;gap:6px;margin:8px 0 0 0;">
+            <button class="xhs-btn xhs-btn-secondary" style="flex:1;padding:6px 4px;font-size:11px;" id="xhsBtnLearnNow" title="一键从当前已聊会话中学习并提炼我的专属话术风格">🧠 一键学习话术</button>
+            <button class="xhs-btn xhs-btn-secondary" style="flex:1;padding:6px 4px;font-size:11px;" id="xhsBtnSendWecomCard" title="一键向当前客户发送企业微信名片">📇 发送企微名片</button>
+            <button class="xhs-btn xhs-btn-secondary" style="flex:1;padding:6px 4px;font-size:11px;" id="xhsBtnSendLeadCard" title="一键向当前客户发送官方留资表单卡">📋 发送留资卡</button>
+          </div>
           <div style="font-size:11px;color:#64748b;margin:8px 0;" id="xhsAutoArmHint"></div>
           <div class="xhs-feedback-card" id="xhsFeedbackCard" hidden>
             <div class="xhs-feedback-title"><span>人工校准</span><span class="xhs-feedback-kb">持续学习</span></div>
@@ -1159,7 +1758,97 @@
     drop.addEventListener('dragleave', () => drop.classList.remove('dragging'));
     drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('dragging'); uploadKnowledgeFiles(e.dataTransfer.files); });
     root.querySelector('#xhsBtnGenNow').addEventListener('click', () => state.runMode === 'full_auto' ? runFullAutoCycle() : handleCopilotSession(true));
+    root.querySelector('#xhsBtnLearnNow').addEventListener('click', learnCurrentHistory);
+    root.querySelector('#xhsBtnSendWecomCard').addEventListener('click', () => sendOfficialCard('wecom'));
+    root.querySelector('#xhsBtnSendLeadCard').addEventListener('click', () => sendOfficialCard('lead'));
     root.querySelector('#xhsBtnSaveFeedback').addEventListener('click', saveHumanFeedback);
+  }
+
+  async function learnCurrentHistory() {
+    const button = document.getElementById('xhsBtnLearnNow');
+    if (button) button.disabled = true;
+    addLog('info', '正在采样当前会话并提炼你的专属话术…');
+    try {
+      const sampleResult = collectHistorySamples(12, 30);
+      if (!sampleResult.ok || !sampleResult.sessions.length) {
+        throw new Error(sampleResult.error || '未提取到客服有效回复记录');
+      }
+      let token = state.workspaceToken;
+      if (!token) {
+        token = await registerWorkspace(state.workspaceName || '我的工作区');
+        state.workspaceToken = token;
+        await storageSet({ workspaceToken: token });
+      }
+      const response = await bridgeFetch(getBridgeUrl() + '/tenant/learn-history', {
+        method: 'POST',
+        headers: apiHeaders(),
+        body: JSON.stringify({ sessions: sampleResult.sessions })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'HTTP ' + response.status);
+      const patch = {
+        businessProfile: data.config?.business_profile || state.businessProfile,
+        replyPreferences: data.config?.reply_preferences || state.replyPreferences,
+        historyLearnedAt: Date.now(),
+        learnedSummary: data.summary || '已学习历史回复',
+        configVersion: Date.now()
+      };
+      await storageSet(patch);
+      state = Object.assign({}, state, patch);
+      addLog('success', '话术学习成功！' + patch.learnedSummary);
+      updateRuntimeStatus('copilot', '已加载专属话术画像');
+    } catch (err) {
+      addLog('error', '学习失败：' + err.message);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function sendOfficialCard(type = 'wecom') {
+    const session = getActiveSession();
+    if (!session?.id) {
+      addLog('warn', '未选中客户，请先点击左侧客户会话');
+      return { ok: false, error: 'no_session' };
+    }
+    const label = type === 'wecom' ? '企业微信名片' : '官方留资卡';
+    try {
+      // 1. 切换到右侧“获客工具” Tab
+      const allHeaders = Array.from(document.querySelectorAll('.d-tabs-header, [class*="tab-header"], span, div'));
+      const toolHeader = allHeaders.find(h => cleanText(h.innerText) === '获客工具' && h.children.length === 0);
+      if (toolHeader) {
+        toolHeader.click();
+        await sleep(300);
+      }
+      // 2. 切换子 Tab：“名片” 或 “留资卡”
+      const targetSubName = type === 'wecom' ? '名片' : '留资卡';
+      const subSegments = Array.from(document.querySelectorAll('.d-segment-item, [class*="segment-item"], span, div'));
+      const targetSegment = subSegments.find(s => cleanText(s.innerText) === targetSubName && s.children.length === 0);
+      if (targetSegment) {
+        targetSegment.click();
+        await sleep(300);
+      }
+      // 3. 找到卡片容器及其发送按钮
+      const cards = Array.from(document.querySelectorAll('.business-card .card, .card-box, .card, [class*="card"]'))
+        .filter(c => c.offsetParent !== null && (type === 'wecom' ? c.innerText.includes('企微') || c.innerText.includes('名片') : c.innerText.includes('留资') || c.innerText.includes('表单') || c.querySelector('button')));
+      const targetCard = cards[0] || document.querySelector('.business-card .card');
+      const sendBtn = targetCard?.querySelector('button.btn, button') || Array.from(document.querySelectorAll('button')).find(b => b.offsetParent !== null && cleanText(b.innerText) === '发送');
+      if (!sendBtn) {
+        const detailTip = type === 'lead'
+          ? '未在右侧找到可发送的官方留资卡。请确认已在小红书【专业号后台 -> 获客工具 -> 用户留资卡】中创建留资表单卡'
+          : '未在右侧找到可发送的企业微信名片。请确认已在小红书【专业号后台 -> 获客工具 -> 名片】中配置企微名片';
+        addLog('warn', detailTip);
+        return { ok: false, error: 'card_not_found' };
+      }
+      sendBtn.click();
+      await setFollowupState(session, type === 'wecom'
+        ? { stage: 'card_sent', cardClicked: false, nextFollowupAt: Date.now() + 24 * 60 * 60 * 1000 }
+        : { stage: 'waiting_reply', nextFollowupAt: Date.now() + 24 * 60 * 60 * 1000 });
+      addLog('success', `已向 [${session.name}] 发送${label}`);
+      return { ok: true };
+    } catch (err) {
+      addLog('error', `发送${label}失败：${err.message || '操作异常'}`);
+      return { ok: false, error: err.message };
+    }
   }
 
   function scheduleSense(delay = 120) {
@@ -1167,8 +1856,35 @@
     senseDebounce = setTimeout(() => handleCopilotSession(false), delay);
   }
 
-  function onDocumentClick(event) {
+  function onTextareaInput(event) {
     if (!event.isTrusted) return;
+    lastUserActivityAt = Date.now();
+    const textarea = event.target?.closest?.('textarea');
+    if (!textarea || textarea !== getReplyTextarea()) return;
+    const session = getActiveSession();
+    if (!session?.id) return;
+    const history = parseConversationHistory(session);
+    const text = textarea.value;
+    if (!cleanText(text)) {
+      // 用户手动清空了输入框，记录当前签名已被用户主动清空，禁止轮询重复回填
+      userClearedSignatures.set(session.id, history.signature);
+      draftCache.delete(session.id);
+      manualDraftCache.delete(session.id);
+      clearPersistentDraftsForSession(session.id).catch(() => {});
+      hideFeedbackCard();
+    } else {
+      userClearedSignatures.delete(session.id);
+      manualDraftCache.set(session.id, {
+        text: text,
+        signature: history.signature
+      });
+      if (feedbackCandidate && feedbackCandidate.session.id === session.id) {
+        feedbackCandidate.humanReply = text;
+      }
+    }
+  }
+
+  function onDocumentClick(event) {
     lastUserActivityAt = Date.now();
     const clickedButton = event.target.closest?.('button');
     if (clickedButton && cleanText(clickedButton.innerText) === '发送') captureFeedbackCandidate();
@@ -1206,6 +1922,7 @@
   async function initialize() {
     const saved = await storageGet(Object.keys(DEFAULTS));
     state = { ...state, ...Object.fromEntries(Object.entries(saved).filter(([, value]) => value !== undefined)) };
+    await loadPersistentDraftCache();
     if (!state.onboardingComplete) {
       state.enabled = false;
       state.runMode = 'copilot';
@@ -1226,29 +1943,42 @@
     document.addEventListener('pointerdown', onUserActivity, true);
     document.addEventListener('wheel', onUserActivity, true);
     document.addEventListener('keydown', onUserActivity, true);
+    document.addEventListener('input', onTextareaInput, true);
+    window.addEventListener('XHS_TEST_GENERATE', () => handleCopilotSession(true));
     observer = new MutationObserver(mutations => {
       if (mutations.some(m => !m.target.closest?.('#xhs-reply-dock-root'))) scheduleSense(160);
     });
     observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'data-key'] });
     senseTimer = setInterval(() => scheduleSense(0), 1100);
     autoTimer = setInterval(runFullAutoCycle, 900);
+    setInterval(scanAndSyncContactList, 3000);
     scheduleSense(250);
+    scanAndSyncContactList();
     addLog('success', `V${VERSION} 已加载：会话隔离、双模式调度与人工反馈学习已启用`);
   }
 
-  chrome.runtime.onMessage.addListener(message => {
-    if (message?.type !== 'CONFIG_UPDATED') return;
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === 'SYNC_PLATFORM_LEADS') {
+      syncPlatformLeads().then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message || '同步失败' }));
+      return true;
+    }
+    if (message?.type === 'COLLECT_HISTORY_SAMPLES') {
+      sendResponse(collectHistorySamples(message.maxSessions, message.maxTurns));
+      return false;
+    }
+    if (message?.type !== 'CONFIG_UPDATED') return false;
     state = { ...state, ...(message.config || {}) };
     if (message.config?.workspaceToken) globalCircuitUntil = 0;
     if (!state.enabled || state.runMode !== 'full_auto') { state.fullAutoArmedAt = 0; state.operatorAway = false; }
     syncDockFromState();
     abortPendingRequest('popup_config_changed');
     if (state.enabled && state.runMode === 'copilot') scheduleSense(80);
+    return false;
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    ['enabled', 'onboardingComplete', 'runMode', 'timeScope', 'fullAutoArmedAt', 'operatorAway', 'repliedCount', 'leadsCount', 'statsDate', 'bridgeUrl', 'workspaceToken', 'accountId', 'knowledgeScope', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl', 'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'monitor', 'processedMap', 'hourlySendTimestamps', 'uncertainSendMap', 'autoReplyMaxAgeMinutes', 'contactBlacklist'].forEach(key => {
+    ['enabled', 'onboardingComplete', 'runMode', 'timeScope', 'fullAutoArmedAt', 'operatorAway', 'repliedCount', 'leadsCount', 'statsDate', 'bridgeUrl', 'workspaceToken', 'accountId', 'knowledgeScope', 'configVersion', 'modelBaseUrl', 'modelName', 'modelApiKey', 'embeddingBaseUrl', 'embeddingModel', 'embeddingApiKey', 'feishuAppId', 'feishuAppSecret', 'monitor', 'processedMap', 'hourlySendTimestamps', 'uncertainSendMap', 'autoReplyMaxAgeMinutes', 'contactBlacklist'].forEach(key => {
       if (changes[key]) state[key] = changes[key].newValue;
     });
     if (changes.workspaceToken?.newValue) globalCircuitUntil = 0;
@@ -1269,6 +1999,7 @@
       document.removeEventListener('pointerdown', onUserActivity, true);
       document.removeEventListener('wheel', onUserActivity, true);
       document.removeEventListener('keydown', onUserActivity, true);
+      document.removeEventListener('input', onTextareaInput, true);
       document.getElementById('xhs-reply-dock-root')?.remove();
     }
   };

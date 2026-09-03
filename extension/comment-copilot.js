@@ -76,14 +76,22 @@
     const original = chip.textContent;
     chip.textContent = '生成中…';
     chip.style.opacity = '0.6';
-    try {
-      const bridge = await bridgeBase();
+   try {
+     const bridge = await bridgeBase();
+      const storage = await new Promise((r) => chrome.storage.local.get(
+        ['workspaceToken', 'modelBaseUrl', 'modelName', 'modelApiKey'],
+        (x) => r(x || {})
+      ));
+      const modelHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${storage.workspaceToken || ''}`,
+        'X-Model-Base-Url': storage.modelBaseUrl || 'http://127.0.0.1:10100/v1/chat/completions',
+        'X-Model-Name': storage.modelName || 'google-antigravity/gemini-3.7-flash',
+        'X-Model-Key': storage.modelApiKey || ''
+      };
       const response = await fetch(`${bridge}/reply`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${await new Promise((r) => chrome.storage.local.get(['workspaceToken'], (x) => r(x.workspaceToken || '')))}`
-        },
+        headers: modelHeaders,
         body: JSON.stringify({
           session_id: `comment:${location.pathname}`,
           user_name: commentAuthor(item),

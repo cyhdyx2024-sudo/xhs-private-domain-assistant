@@ -4,7 +4,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const storageGet = keys => new Promise(resolve => chrome.storage.local.get(keys, resolve));
   const storageSet = values => new Promise(resolve => chrome.storage.local.set(values, resolve));
 
-  const keys = ['onboardingComplete', 'enabled', 'runMode', 'timeScope', 'fullAutoArmedAt', 'operatorAway', 'repliedCount', 'leadsCount', 'statsDate'];
+  const keys = ['onboardingComplete', 'enabled', 'runMode', 'timeScope', 'fullAutoArmedAt', 'operatorAway', 'repliedCount', 'leadsCount', 'statsDate', 'bridgeUrl', 'workspaceToken'];
   let config = await storageGet(keys);
   const dailyStats = Safety.normalizeDailyStats(config);
   if (dailyStats.statsDate !== config.statsDate) {
@@ -25,6 +25,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('todayReplied').textContent = config.repliedCount || 0;
   $('todayLeads').textContent = config.leadsCount || 0;
   updateStatus();
+
+  async function refreshServerStats() {
+    if (!config.workspaceToken) return;
+    const bridgeUrl = String(config.bridgeUrl || 'http://127.0.0.1:18195').replace(/\/+$/, '');
+    try {
+      const response = await fetch(`${bridgeUrl}/report/today`, {
+        headers: { Authorization: `Bearer ${config.workspaceToken}` }, cache: 'no-store'
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (!data.ok) return;
+      config.repliedCount = Number(data.replies || 0);
+      config.leadsCount = Number(data.leads || 0);
+      $('todayReplied').textContent = config.repliedCount;
+      $('todayLeads').textContent = config.leadsCount;
+      await storageSet({ repliedCount: config.repliedCount, leadsCount: config.leadsCount });
+    } catch (_) { /* Bridge 离线时保留本地统计，不阻塞弹窗 */ }
+  }
+
+  refreshServerStats();
 
   async function notify(patch) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -67,6 +87,27 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   $('btnOpenXhs').addEventListener('click', () => chrome.tabs.create({ url: 'https://pro.xiaohongshu.com/im/multiCustomerService' }));
+  $('btnSyncLeads').addEventListener('click', async () => {
+    const button = $('btnSyncLeads');
+    button.disabled = true;
+    button.textContent = '正在扫描留资会话…';
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tabs[0]?.id || !/^https:\/\/(?:[^/]+\.)?xiaohongshu\.com\//.test(tabs[0].url || '')) {
+        throw new Error('请先打开小红书客服工作台');
+      }
+      const result = await chrome.tabs.sendMessage(tabs[0].id, { type: 'SYNC_PLATFORM_LEADS' });
+      if (!result?.ok) throw new Error(result?.error || '同步失败');
+      await refreshServerStats();
+      button.textContent = result.tagged
+        ? `完成：识别 ${result.captured}/${result.tagged} 条`
+        : '当前列表没有“留客资”会话';
+    } catch (error) {
+      button.textContent = error.message || '同步失败，请刷新工作台';
+    } finally {
+      setTimeout(() => { button.disabled = false; button.textContent = '同步平台留资'; }, 2800);
+    }
+  });
   $('btnQuickInject').addEventListener('click', async () => {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tabs[0]?.id) chrome.tabs.reload(tabs[0].id);
