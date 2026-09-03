@@ -254,7 +254,26 @@ def retrieve_knowledge_chunks(query: str, tenant_id: str, embedding_config: dict
     return [{**row, "score": round(score, 4)} for score, row in sorted(scored, key=lambda item: item[0], reverse=True)[:limit]]
 
 
-def import_feishu_doc(url: str, app_id: str, app_secret: str) -> tuple[str, str]:
+def import_feishu_doc(url: str, app_id: str = "", app_secret: str = "") -> tuple[str, str]:
+    # 优先复用本地已经认证好的 lark-cli CLI 免密拉取 (无需商家手动申请和配置自建应用)
+    try:
+        cmd = ["/opt/homebrew/bin/lark-cli", "docs", "+fetch", "--doc", url, "--doc-format", "markdown"]
+        env = dict(os.environ)
+        env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
+        res = subprocess.run(cmd, env=env, capture_output=True, text=True, encoding="utf-8", timeout=25)
+        if res.returncode == 0 and res.stdout:
+            data = json.loads(res.stdout)
+            doc = data.get("data", {}).get("document", {})
+            doc_content = doc.get("content", "")
+            if doc_content:
+                title = "飞书文档"
+                if "<title>" in doc_content:
+                    title = doc_content.split("<title>")[1].split("</title>")[0].strip()
+                return title, doc_content
+    except Exception as e:
+        print(f"[Feishu CLI Fallback Notice] {e}")
+
+    # 回退到 OpenAPI 原生自建应用凭据请求
     match = re.search(r"/(docx|wiki)/([A-Za-z0-9]+)", url)
     if not match:
         raise ValueError("feishu_link_type_not_supported")

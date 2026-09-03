@@ -700,8 +700,7 @@ class HttpHandler(BaseHTTPRequestHandler):
                         link = str(payload.get("url") or "").strip()
                         app_id = str(self.headers.get("X-Feishu-App-Id") or "").strip()
                         app_secret = str(self.headers.get("X-Feishu-App-Secret") or "").strip()
-                        if not app_id or not app_secret:
-                            raise ValueError("feishu_app_credentials_required")
+                        # 优先借助本地 lark-cli 导入，若无配置才校验 app_id
                         title, text = import_feishu_doc(link, app_id, app_secret)
                         result = ingest_knowledge_document(tenant, title, text, "feishu", link, embedding_config)
                 except (ValueError, binascii.Error) as error:
