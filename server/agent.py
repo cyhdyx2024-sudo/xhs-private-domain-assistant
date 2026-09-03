@@ -49,6 +49,7 @@ from db import (
     update_tenant,
 )
 from gateway import (
+    get_last_usage,
     OPENCODEX_API_KEY,
     OPENCODEX_MODEL,
     OPENCODEX_URL,
@@ -308,7 +309,7 @@ def call_llm_dynamic(
 
     def request_once(request_payload: dict) -> str:
         config = model_config or {"url": OPENCODEX_URL, "key": OPENCODEX_API_KEY, "model": OPENCODEX_MODEL}
-        return request_model(config, request_payload["messages"], request_payload.get("temperature", 0.55), request_payload.get("max_tokens", 800))
+        return request_model(config, request_payload["messages"], request_payload.get("temperature", 0.55), request_payload.get("max_tokens", 120))
 
     try:
         reply = request_once(payload)
@@ -327,6 +328,42 @@ def call_llm_dynamic(
     except Exception as e:
         print(f"[LLM Error] {e}")
         return "", 0, []
+
+
+
+SESSION_CALL_TIMES: dict[str, list[float]] = {}
+TENANT_CALL_TIMES: dict[str, list[float]] = {}
+RATE_LIMIT_LOCK = threading.Lock()
+
+
+def check_rate_limits(tenant_id: str, session_id: str) -> tuple[bool, str]:
+    now = time.monotonic()
+    with RATE_LIMIT_LOCK:
+        if len(SESSION_CALL_TIMES) > 5000:
+            SESSION_CALL_TIMES.clear()
+        if len(TENANT_CALL_TIMES) > 5000:
+            TENANT_CALL_TIMES.clear()
+
+        if session_id:
+            s_times = [t for t in SESSION_CALL_TIMES.get(session_id, []) if now - t < 600.0]
+            # 60秒内最多允许2次请求，坚决阻断由于DOM重绘引起的秒级死循环
+            recent_1m = [t for t in s_times if now - t < 60.0]
+            if len(recent_1m) >= 2:
+                return False, "同一会话 60 秒内仅允许请求 2 次，防死循环保护已触发"
+            # 10分钟内最多允许8次请求
+            if len(s_times) >= 8:
+                return False, "同一会话 10 分钟内已达 8 次上限，防死循环保护已触发"
+            s_times.append(now)
+            SESSION_CALL_TIMES[session_id] = s_times
+
+        if tenant_id:
+            t_times = [t for t in TENANT_CALL_TIMES.get(tenant_id, []) if now - t < 3600.0]
+            if len(t_times) >= 120:
+                return False, "工作区每小时调用已达 120 次硬上限，已触发防刷熔断"
+            t_times.append(now)
+            TENANT_CALL_TIMES[tenant_id] = t_times
+
+    return True, ""
 
 
 class HttpHandler(BaseHTTPRequestHandler):
@@ -732,6 +769,13 @@ class HttpHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"ok": False, "error": "origin_not_allowed"})
                 return
 
+            # 服务端会话级与租户级防死循环硬熔断
+            sid = str(payload.get("session_id") or "")
+            passed, limit_err = check_rate_limits(tenant["id"] if tenant else "", sid)
+            if not passed:
+                self._send_json(429, {"ok": False, "error": "rate_limited", "message": limit_err})
+                return
+
             try:
                 temperature = min(0.8, max(0.2, float(payload.get("temperature") or (0.3 if action == "rewrite_fallback" else 0.55))))
             except (TypeError, ValueError):
@@ -772,9 +816,11 @@ class HttpHandler(BaseHTTPRequestHandler):
                 user_name, latest_msg, clean_reply, action, int((time.monotonic() - request_started) * 1000),
             )
 
+            last_usage = get_last_usage()
             self._send_json(200, {
                 "ok": True,
                 "reply": clean_reply,
+                "usage": last_usage,
                 "send_card": send_card,
                 "engine": (
                     f"{model_config['model']} / OpenAI-compatible"

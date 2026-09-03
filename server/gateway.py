@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import os
 import re
 import urllib.request
@@ -106,7 +107,18 @@ def build_system_prompt(tenant: dict | None) -> str:
     return f"{SYSTEM_PROMPT}\n\n当前工作区已确认资料（只能使用这里和当前会话中的事实）：\n{facts}"
 
 
-def request_model(model_config: dict, messages: list, temperature: float = 0.45, max_tokens: int = 800) -> str:
+LAST_USAGE = threading.local()
+
+
+def get_last_usage() -> dict:
+    return {
+        "prompt_tokens": getattr(LAST_USAGE, "prompt_tokens", 0),
+        "completion_tokens": getattr(LAST_USAGE, "completion_tokens", 0),
+        "total_tokens": getattr(LAST_USAGE, "total_tokens", 0),
+    }
+
+
+def request_model(model_config: dict, messages: list, temperature: float = 0.45, max_tokens: int = 120) -> str:
     payload = {
         "model": model_config["model"], "messages": messages,
         "temperature": temperature, "max_tokens": max_tokens,
@@ -118,9 +130,22 @@ def request_model(model_config: dict, messages: list, temperature: float = 0.45,
     req = urllib.request.Request(model_config["url"], data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=25) as resp:
         result = json.loads(resp.read().decode("utf-8"))
+    usage = result.get("usage") or {}
+    p_tokens = int(usage.get("prompt_tokens") or 0)
+    c_tokens = int(usage.get("completion_tokens") or 0)
+    t_tokens = int(usage.get("total_tokens") or (p_tokens + c_tokens))
+    if t_tokens == 0:
+        in_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        p_tokens = max(1, int(in_chars * 1.2))
     choice = result["choices"][0] if result.get("choices") else {}
     msg = choice.get("message", {})
     content = str(msg.get("content") or "").strip().strip('"“”')
+    if t_tokens == 0:
+        c_tokens = max(1, int(len(content) * 1.2))
+        t_tokens = p_tokens + c_tokens
+    LAST_USAGE.prompt_tokens = p_tokens
+    LAST_USAGE.completion_tokens = c_tokens
+    LAST_USAGE.total_tokens = t_tokens
     return content
 
 

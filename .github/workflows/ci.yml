@@ -28,7 +28,7 @@ jobs:
           node extension/test_release.mjs
           node extension/test_safety.mjs
       - name: Bridge tests
-        run: python3 -m unittest test_safety.py test_feedback.py test_pdf_ingest.py test_endpoints.py
+        run: python3 -m unittest test_safety.py test_feedback.py test_pdf_ingest.py test_endpoints.py test_rate_limits.py
         working-directory: server
       - name: Build release archives
         run: python3 scripts/package_release.py

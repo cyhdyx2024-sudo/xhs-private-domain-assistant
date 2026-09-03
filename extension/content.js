@@ -15,6 +15,12 @@
     processedMap: {}, hourlySendTimestamps: [], uncertainSendMap: {}, followupStateMap: {},
     bridgeUrl: 'http://127.0.0.1:18195', workspaceToken: '', accountId: '', operatorNickname: '',
     knowledgeScope: 'default',
+    dailyTokenBudget: 200_000,
+    dailyCallBudget: 300,
+    todayTokens: 0,
+    todayCalls: 0,
+    tokenDate: '',
+    circuitTripped: false,
     modelBaseUrl: 'http://127.0.0.1:10100/v1/chat/completions',
     modelName: 'google-antigravity/gemini-3.7-flash',
     configVersion: 0,
@@ -57,6 +63,8 @@
   const leadRetryUntil = new Map();
   const signatureFailureCounts = new Map();
   const capturedLeadKeys = new Set();
+  const sessionLastFetchTime = new Map();
+  const SESSION_FETCH_COOLDOWN_MS = 45_000;
   const scanSeenIds = new Set();
   let globalCircuitUntil = 0;
   let scanPassStartedAt = Date.now();
@@ -532,6 +540,7 @@
     state.monitor = { ...(state.monitor || {}), ...patch };
     storageSet({ monitor: state.monitor });
     syncMonitorUI();
+    updateTokenMeterUI();
   }
 
   function parseTimestamp(text) {
@@ -867,9 +876,93 @@
     addLog('error', '工作区凭据已失效，系统已停机并保留原工作区信息。请先恢复凭据，勿直接新建工作区');
   }
 
+  function checkDailyTokenState() {
+    const today = new Date().toLocaleDateString("zh-CN");
+    if (state.tokenDate !== today) {
+      state.tokenDate = today;
+      state.todayTokens = 0;
+      state.todayCalls = 0;
+      state.circuitTripped = false;
+      storageSet({ tokenDate: today, todayTokens: 0, todayCalls: 0, circuitTripped: false });
+    }
+    return Boolean(state.circuitTripped);
+  }
+
+  function recordTokenUsage(tokens) {
+    checkDailyTokenState();
+    const t = Math.max(1, Number(tokens) || 1);
+    state.todayTokens = Number(state.todayTokens || 0) + t;
+    state.todayCalls = Number(state.todayCalls || 0) + 1;
+    const budget = Number(state.dailyTokenBudget || 200_000);
+    const callLimit = Number(state.dailyCallBudget || 300);
+    if (state.todayTokens >= budget || state.todayCalls >= callLimit) {
+      state.circuitTripped = true;
+      addLog("error", "🚨 【Token熔断】今日消耗已达硬上限（" + (state.todayTokens / 1000).toFixed(1) + "k / " + (budget / 1000).toFixed(0) + "k），已自动停止一切自动请求！防止额度滥用。");
+      updateRuntimeStatus(state.runMode, "🚨 Token已熔断");
+    }
+    storageSet({
+      todayTokens: state.todayTokens,
+      todayCalls: state.todayCalls,
+      tokenDate: state.tokenDate,
+      circuitTripped: state.circuitTripped
+    });
+    updateTokenMeterUI();
+  }
+
+  function resetTokenCircuit() {
+    state.todayTokens = 0;
+    state.todayCalls = 0;
+    state.circuitTripped = false;
+    state.tokenDate = new Date().toLocaleDateString("zh-CN");
+    storageSet({
+      todayTokens: 0,
+      todayCalls: 0,
+      circuitTripped: false,
+      tokenDate: state.tokenDate
+    });
+    updateTokenMeterUI();
+    addLog("info", "已重置今日 Token 配额与熔断状态");
+  }
+
+  function updateTokenMeterUI() {
+    const usageText = document.getElementById("xhsTokenUsageText");
+    const bar = document.getElementById("xhsTokenProgressBar");
+    const countText = document.getElementById("xhsCallCountText");
+    const badge = document.getElementById("xhsTokenStatusBadge");
+    if (!usageText || !bar) return;
+
+    const used = Number(state.todayTokens || 0);
+    const budget = Number(state.dailyTokenBudget || 200_000);
+    const calls = Number(state.todayCalls || 0);
+    const pct = Math.min(100, Math.round((used / budget) * 100));
+
+    usageText.textContent = (used / 1000).toFixed(1) + "k / " + (budget / 1000).toFixed(0) + "k (" + pct + "%)";
+    bar.style.width = pct + "%";
+
+    if (state.circuitTripped) {
+      bar.style.background = "#ef4444";
+      if (badge) { badge.textContent = "已熔断"; badge.style.color = "#ef4444"; }
+      usageText.style.color = "#ef4444";
+    } else if (pct >= 80) {
+      bar.style.background = "linear-gradient(90deg, #f59e0b, #ef4444)";
+      if (badge) { badge.textContent = "预警"; badge.style.color = "#f59e0b"; }
+      usageText.style.color = "#f59e0b";
+    } else {
+      bar.style.background = "linear-gradient(90deg, #38bdf8, #818cf8)";
+      if (badge) { badge.textContent = "运行中"; badge.style.color = "#10b981"; }
+      usageText.style.color = "#38bdf8";
+    }
+    if (countText) countText.textContent = "今日调用: " + calls + " 次";
+  }
+
   async function fetchLLMReply(history, session, action) {
     if (!history.latestUserMsg && action !== 'manual_followup') return '';
     if (inFlightSignatures.has(history.signature)) return '';
+    if (checkDailyTokenState()) {
+      addLog('error', '🚨 已触发 Token 熔断保护（今日消耗已达上限），系统已停止调用。可在控制台点击“重置”恢复');
+      return '';
+    }
+    sessionLastFetchTime.set(session.id, Date.now());
     const retryAt = Math.max(Number(messageRetryUntil.get(history.signature) || 0), Number(globalCircuitUntil || 0));
     if (retryAt > Date.now()) return '';
     const serial = ++requestSerial;
@@ -939,6 +1032,8 @@
         messageRetryUntil.delete(history.signature);
         recordMonitor({ lastLlmAt: Date.now(), lastLlmLatencyMs: Date.now() - requestStartedAt,
           llmSuccessCount: Number(state.monitor?.llmSuccessCount || 0) + 1, lastError: '' });
+        const usageTokens = Number(data.usage?.total_tokens || 0);
+        recordTokenUsage(usageTokens > 0 ? usageTokens : (reply.length * 2 + (history.turns.length * 30)));
         const sourceCount = Array.isArray(data.knowledge_sources) ? data.knowledge_sources.length : 0;
         addLog('success', `已为 [${session.name}] 生成上下文专属回复${sourceCount ? ` · 命中${sourceCount}段业务资料` : ''}${data.memory_hits ? ` · ${data.memory_hits}条人工案例` : ''}`);
       }
@@ -1167,6 +1262,8 @@
       }
       if (savedManualDraft.signature !== history.signature) manualDraftCache.delete(session.id);
     }
+    const lastFetchAt = Number(sessionLastFetchTime.get(session.id) || 0);
+    if (!force && Date.now() - lastFetchAt < SESSION_FETCH_COOLDOWN_MS) return;
     if (!force && Number(messageRetryUntil.get(effectiveHistory.signature) || 0) > Date.now()) return;
 
     // 用户已明确清空当前签名的草稿，日常后台轮询绝不再重复打扰或回填
@@ -1713,6 +1810,22 @@
             <button class="xhs-btn xhs-btn-secondary" style="width:100%;" id="xhsBtnSaveFeedback">记住当前人工话术</button>
             <div class="xhs-feedback-status" id="xhsFeedbackStatus"></div>
           </div>
+          <div class="xhs-token-meter" style="margin:8px 0 10px;padding:8px 10px;background:rgba(15,23,42,0.6);border-radius:8px;border:1px solid rgba(148,163,184,0.15);">
+            <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;margin-bottom:5px;">
+              <span style="font-weight:600;color:#94a3b8;display:flex;align-items:center;gap:4px;"><span>🛡️</span> <span>Token 熔断保护</span></span>
+              <span id="xhsTokenUsageText" style="color:#38bdf8;font-family:monospace;font-weight:700;">0 / 200k (0%)</span>
+            </div>
+            <div style="height:6px;background:#1e293b;border-radius:3px;overflow:hidden;position:relative;">
+              <div id="xhsTokenProgressBar" style="width:0%;height:100%;background:linear-gradient(90deg, #38bdf8, #818cf8);border-radius:3px;transition:width 0.3s ease;"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#64748b;margin-top:5px;">
+              <span id="xhsCallCountText">今日调用: 0 次</span>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span id="xhsTokenStatusBadge" style="color:#10b981;font-weight:600;">运行中</span>
+                <button id="xhsBtnResetTokens" style="background:transparent;border:none;color:#64748b;cursor:pointer;padding:0;text-decoration:underline;font-size:10px;" title="重置今日计数与熔断状态">重置</button>
+              </div>
+            </div>
+          </div>
           <div style="font-size:11px;font-weight:600;color:#64748b;margin:10px 0 6px;display:flex;justify-content:space-between;gap:8px;">
             <span>执行轨迹</span><span id="xhsActiveCustomerName" style="color:#ff2442;text-align:right;">当前客户：识别中</span></div>
           <div class="xhs-log-list" id="xhsLogContainer"><div style="color:#94a3b8;font-size:11px;text-align:center;padding:10px;">等待会话变化</div></div>
@@ -1739,6 +1852,10 @@
         </div>
       </div>`;
     document.body.appendChild(root);
+    root.querySelector('#xhsBtnResetTokens')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      resetTokenCircuit();
+    });
     root.querySelector('#xhsPillTrigger').addEventListener('click', () => root.querySelector('#xhsExpandedPanel').classList.toggle('active'));
     root.querySelector('#xhsClosePanelBtn').addEventListener('click', () => root.querySelector('#xhsExpandedPanel').classList.remove('active'));
     root.querySelectorAll('.xhs-dock-tab').forEach(tab => tab.addEventListener('click', () => {
