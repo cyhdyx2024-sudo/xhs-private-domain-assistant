@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import subprocess
 from urllib.parse import urlparse
 from gateway import PRODUCT_MODE, ALLOWED_MODEL_HOSTS
 import urllib.error
@@ -21,7 +22,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
-from db import FEEDBACK_DB, clean_analysis_text, init_feedback_db, _terms
+from db import FEEDBACK_DB, clean_analysis_text, db_connection, init_feedback_db, _terms
 
 def _xml_text(data: bytes) -> str:
     root = ET.fromstring(data)
@@ -152,7 +153,7 @@ def ingest_knowledge_document(tenant: dict, title: str, text: str, source_type: 
     checksum = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     now = datetime.now(timezone.utc).isoformat()
     document_id = f"doc_{secrets.token_hex(10)}"
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection(FEEDBACK_DB) as conn:
         existing = conn.execute(
             "SELECT id, title, status, status_detail, chunk_count, version, enabled FROM knowledge_documents WHERE tenant_id=? AND checksum=?",
             (tenant["id"], checksum),
@@ -163,6 +164,11 @@ def ingest_knowledge_document(tenant: dict, title: str, text: str, source_type: 
             "SELECT COALESCE(MAX(version), 0) + 1 FROM knowledge_documents WHERE tenant_id=? AND (title=? OR source_uri=?)",
             (tenant["id"], clean_analysis_text(title, 200), source_uri),
         ).fetchone()[0]
+        # 同一标题的新版本成为唯一启用版本，避免旧产品手册继续参与检索。
+        conn.execute(
+            "UPDATE knowledge_documents SET enabled=0, updated_at=? WHERE tenant_id=? AND title=?",
+            (now, tenant["id"], clean_analysis_text(title, 200)),
+        )
         conn.execute(
             """INSERT INTO knowledge_documents
                (id, tenant_id, title, source_type, source_uri, checksum, version, status, status_detail, chunk_count, created_at, updated_at)
@@ -185,20 +191,17 @@ def ingest_knowledge_document(tenant: dict, title: str, text: str, source_type: 
 
 def list_knowledge_documents(tenant_id: str) -> list[dict]:
     init_feedback_db()
-    # 自动种子数据同步：如果是新创建的工作区，自动同步预设产品手册
-    with sqlite3.connect(FEEDBACK_DB) as conn:
-        count = conn.execute("SELECT COUNT(*) FROM knowledge_documents WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
-        if count == 0:
-            seed_path = Path("server/data/seed_knowledge_xinzuo.md")
-            pdf_path = Path("server/data/新作AI2.0官方产品手册.pdf")
-            if seed_path.exists():
-                tenant = {"id": tenant_id, "workspace_name": "默认工作区"}
-                ingest_knowledge_document(tenant, "新作AI 2.0官方产品手册与常见问答.md", seed_path.read_text(encoding="utf-8"), "file", "", None)
-            if pdf_path.exists():
-                tenant = {"id": tenant_id, "workspace_name": "默认工作区"}
-                text, stype = extract_uploaded_text("新作AI2.0官方产品手册.pdf", pdf_path.read_bytes())
-                ingest_knowledge_document(tenant, "新作AI2.0官方产品手册.pdf", text, stype, "", None)
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    # 同步当前文本手册；旧 PDF 含历史承诺时不再参与检索，但保留记录供人工核对。
+    seed_path = Path(__file__).resolve().parent / "data" / "seed_knowledge_xinzuo.md"
+    if seed_path.exists():
+        tenant = {"id": tenant_id, "workspace_name": "默认工作区"}
+        ingest_knowledge_document(tenant, "新作AI 2.0官方产品手册与常见问答.md", seed_path.read_text(encoding="utf-8"), "file", "", None)
+    with db_connection(FEEDBACK_DB) as conn:
+        conn.execute(
+            "UPDATE knowledge_documents SET enabled=0 WHERE tenant_id=? AND title='新作AI2.0官方产品手册.pdf'",
+            (tenant_id,),
+        )
+    with db_connection(FEEDBACK_DB) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """SELECT id,title,source_type,source_uri,version,status,status_detail,enabled,chunk_count,created_at,updated_at
@@ -208,7 +211,7 @@ def list_knowledge_documents(tenant_id: str) -> list[dict]:
 
 
 def set_knowledge_document_enabled(tenant_id: str, document_id: str, enabled: bool) -> bool:
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection(FEEDBACK_DB) as conn:
         cursor = conn.execute(
             "UPDATE knowledge_documents SET enabled=?, updated_at=? WHERE id=? AND tenant_id=?",
             (1 if enabled else 0, datetime.now(timezone.utc).isoformat(), document_id, tenant_id),
@@ -232,7 +235,7 @@ def retrieve_knowledge_chunks(query: str, tenant_id: str, embedding_config: dict
             query_vector = embed_texts(embedding_config, [query])[0]
         except Exception as error:
             print(f"[Embedding Query Error] {error}")
-    with sqlite3.connect(FEEDBACK_DB) as conn:
+    with db_connection(FEEDBACK_DB) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """SELECT c.content,c.heading,c.terms_json,c.embedding_json,d.id AS document_id,d.title,d.source_type,d.source_uri,d.version
