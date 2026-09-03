@@ -410,6 +410,10 @@ def init_feedback_db() -> None:
 def log_reply(tenant_id: str, session_id: str, user_name: str, latest_msg: str, reply: str, action: str, latency_ms: int) -> None:
     try:
         with db_connection() as conn:
+            # 自动清理：保留最近 15 天日志，防止单表无限制膨胀
+            cutoff = datetime.now(timezone.utc).timestamp() - 15 * 86400
+            cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+            conn.execute("DELETE FROM reply_log WHERE created_at < ?", (cutoff_iso,))
             conn.execute(
                 "INSERT OR REPLACE INTO reply_log (id, tenant_id, session_id, user_name, latest_msg, reply, action, latency_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (f"r_{secrets.token_hex(10)}", tenant_id or "", session_id or "", user_name or "",
